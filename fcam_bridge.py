@@ -83,8 +83,8 @@ def monotonic_ms():
     return int(time.monotonic() * 1000) & 0xFFFFFFFF
 
 
-def parse_hostport(text, default_host="0.0.0.0", default_port=DEFAULT_PORT):
-    """'host:port', 'host', ':port' or '[v6]:port' -> (host, port)."""
+def parse_hostport(text, default_host="0.0.0.0", default_port=DEFAULT_PORT, allow_zero=False):
+    """'host:port', 'host', ':port' or '[v6]:port' -> (host, port). Port 0 (ephemeral) only with allow_zero."""
     text = text.strip()
     if text.startswith("["):
         end = text.find("]")
@@ -100,7 +100,7 @@ def parse_hostport(text, default_host="0.0.0.0", default_port=DEFAULT_PORT):
         host, port = text, default_port
     if not host:
         host = default_host
-    if not 1 <= port <= 65535:
+    if not (0 if allow_zero else 1) <= port <= 65535:
         raise ValueError("bad port in %r" % text)
     return host, port
 
@@ -378,7 +378,7 @@ class Bridge:
         self._fps_window_start = self.started
         self._fps_window_frames = 0
 
-        host, port = parse_hostport(args.listen)
+        host, port = parse_hostport(args.listen, allow_zero=True)
         family = socket.AF_INET6 if ":" in host else socket.AF_INET
         self.sock = socket.socket(family, socket.SOCK_DGRAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1 << 20)
