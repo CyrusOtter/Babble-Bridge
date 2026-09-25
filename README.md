@@ -24,10 +24,10 @@ on the headset.
 ## What you need on the headset
 
 - SSH access as `steamos` (Developer mode).
-- `/dev/ttyACM0` when the tracker is plugged in. The stock kernel lacks
-  `cdc-acm`; build it once against the matching `linux-*-deckard-headers`
-  package and load it with `insmod`, or install the udev rule below so it loads
-  automatically and the `steamos` user may open the port.
+- `/dev/ttyACM0` when the tracker is plugged in. The stock kernel lacks the
+  `cdc-acm` driver; `build-cdc-acm.sh` builds it on the headset (see
+  [Building cdc-acm.ko](#building-cdc-acmko)) and the udev rule loads it on
+  plug-in and lets the `steamos` user open the port.
 - Wi-Fi on the same network as the PC. The Frame's default firewall zone already
   allows UDP 1024–65535 in.
 
@@ -53,14 +53,47 @@ in SteamVR's `~/.config/openvr/config/appconfig.json`, enables auto-launch and
 starts the overlay (through SteamVR when it is running, headless otherwise; it
 attaches to SteamVR as soon as it comes up). No root is needed for this part.
 
-One-time root steps, if `/dev/ttyACM0` does not show up when the tracker is
-plugged in:
+If `/dev/ttyACM0` does not show up when the tracker is plugged in, build and
+load the driver (see the next section).
+
+## Building cdc-acm.ko
+
+The Steam Frame kernel has no USB serial class driver, so a Babble tracker
+enumerates on the rear USB-C port but gets no `/dev/ttyACM0`. `build-cdc-acm.sh`
+builds `cdc-acm.ko` on the headset, as `steamos`, without root and without
+touching the read-only rootfs:
 
 ```sh
-sudo insmod /home/steamos/cdc-acm/cdc-acm.ko
-sudo install -m 0644 ~/fcam/../babble-bridge-*/90-babble-tracker.rules /etc/udev/rules.d/   # or from the checkout
+bash ~/Babble-Bridge/build-cdc-acm.sh --load        # from the checkout or the release tarball
+```
+
+What it does:
+
+1. Fetches the `linux-*-deckard-headers` package that matches the running
+   kernel with `pacman -Sp` from the repositories already configured on the
+   headset (their URLs are private; the script never prints them) and unpacks
+   it under `~/kbuild`. It refuses to build if the repository's headers version
+   differs from the running kernel.
+2. Downloads `drivers/usb/class/cdc-acm.{c,h}` of the same upstream kernel
+   version (`6.18.0-g…` → tag `v6.18`) from kernel.org, GitHub as fallback, into
+   `~/cdc-acm`. Pass `--source DIR` to use copies fetched on another machine.
+3. Builds with `make -C ~/kbuild/.../build M=~/cdc-acm modules` (gcc, make and
+   binutils are on the headset). BTF is skipped because `pahole` is not
+   available; the module loads fine without it.
+4. Verifies the module's `vermagic` against `uname -r`. With `--load` it runs
+   `sudo insmod` (asks for the password) and lists `/dev/ttyACM*`.
+
+Result: `/home/steamos/cdc-acm/cdc-acm.ko`, the path the udev rule uses. Make
+loading automatic (once, as root):
+
+```sh
+sudo install -m 0644 ~/Babble-Bridge/90-babble-tracker.rules /etc/udev/rules.d/
 sudo udevadm control --reload
 ```
+
+After an OS update the kernel version changes and the module stops loading;
+`build-cdc-acm.sh --check` tells you, and a plain `build-cdc-acm.sh` rebuilds
+it once the matching headers are in the repository.
 
 Check it:
 
@@ -118,6 +151,7 @@ default 30), which is how the bridge is tested without a headset.
 | `overlay/fcam.vrmanifest`, `overlay/fcam_overlay.sh` | SteamVR application manifest (`binary_path_linux_arm`) and its launcher. |
 | `overlay/install-overlay.sh` | Installer (no root). |
 | `fcam-bridge.service`, `install-headset.sh` | systemd alternative. |
+| `build-cdc-acm.sh` | Builds `cdc-acm.ko` for the running kernel on the headset (no root). |
 | `90-babble-tracker.rules` | udev rule: load `cdc-acm.ko`, `uaccess` on the port (root, once). |
 | `PROTOCOL.md` | Wire format. |
 | `tests/` | `python3 -m unittest discover -s tests` |
@@ -160,7 +194,7 @@ fetch without credentials.
 
 | Symptom | Cause / fix |
 |---|---|
-| Log says `cannot open /dev/ttyACM0: No such file` | `cdc-acm` not loaded, or the tracker is not enumerated. `lsusb` should list `303a:1001`; then `sudo insmod .../cdc-acm.ko`. |
+| Log says `cannot open /dev/ttyACM0: No such file` | `cdc-acm` not loaded, or the tracker is not enumerated. `lsusb` should list `303a:1001`; then `build-cdc-acm.sh --load`, or install the udev rule. |
 | `Permission denied` on the port | Install the udev rule (adds the `uaccess` tag) or `sudo chmod 660 /dev/ttyACM0` for a quick test. |
 | Babble stays on "connecting", no `subscriber ... joined` in the log | PC and headset are not on the same network, or the address is wrong. |
 | Subscriber joins, no frames, status says `no-source` | The tracker is not streaming over USB. Stock Babble/OpenIris firmware streams serial only when it is not in Wi-Fi streaming mode. |

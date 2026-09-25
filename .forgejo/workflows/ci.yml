@@ -12,6 +12,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Shell syntax
+        run: bash -n build-cdc-acm.sh install-headset.sh overlay/install-overlay.sh overlay/fcam_overlay.sh
+
       - name: Byte-compile
         run: |
           python3 --version
@@ -48,7 +51,7 @@ jobs:
           fi
           NAME="babble-bridge-${VERSION}"
           mkdir -p "dist/${NAME}"
-          cp -r fcam_bridge.py fcam-bridge.service 90-babble-tracker.rules install-headset.sh \
+          cp -r fcam_bridge.py fcam-bridge.service 90-babble-tracker.rules install-headset.sh build-cdc-acm.sh \
                 overlay README.md PROTOCOL.md "dist/${NAME}/"
           rm -rf "dist/${NAME}/overlay/__pycache__"
           tar -C dist -czf "${NAME}.tar.gz" "${NAME}"
