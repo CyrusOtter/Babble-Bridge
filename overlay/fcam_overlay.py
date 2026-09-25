@@ -22,10 +22,13 @@ import logging
 import os
 import signal
 import socket
+import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+import zlib
 
 try:
     import fcntl
@@ -50,6 +53,8 @@ DEFAULT_LOG = os.path.join(HERE, "fcam_overlay.log")
 LOCK = os.path.join(HERE, "fcam_overlay.lock")
 
 PANEL_W, PANEL_H = 640, 400
+PANEL_FILE_DIR = "/dev/shm" if os.path.isdir("/dev/shm") else tempfile.gettempdir()
+PNG_SIGNATURE = bytes((137, 80, 78, 71, 13, 10, 26, 10))
 BUTTON_H = 64
 VR_RETRY_SECONDS = 5.0
 REDRAW_SECONDS = 0.5          # while the tab is visible
@@ -120,6 +125,22 @@ class Panel:
 
     def text_width(self, string, scale=1):
         return len(string) * fcam_font.CELL_W * scale
+
+    def to_png(self):
+        """Encodes the raster as an RGBA PNG (standard library only)."""
+        stride = self.width * 4
+        raw = bytearray()
+        for y in range(self.height):
+            raw.append(0)  # filter type: none
+            raw += self.buf[y * stride:(y + 1) * stride]
+
+        def chunk(tag, data):
+            return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+
+        return (PNG_SIGNATURE
+                + chunk(b"IHDR", struct.pack(">IIBBBBB", self.width, self.height, 8, 6, 0, 0, 0))
+                + chunk(b"IDAT", zlib.compress(bytes(raw), 1))
+                + chunk(b"IEND", b""))
 
 
 def local_ip():
@@ -193,6 +214,9 @@ class OverlayApp:
         self.vr_error_logged = None
         self.upload_failures = 0
         self.upload_failed_since = None
+        self.panel_file = os.path.join(PANEL_FILE_DIR, "fcam-panel-%d.png" % os.getpid())
+        self.was_visible = False
+        self.texture_confirmed = False
 
     # -- SteamVR connection
 
@@ -201,8 +225,9 @@ class OverlayApp:
         if now - self.last_vr_attempt < VR_RETRY_SECONDS:
             return False
         self.last_vr_attempt = now
+        app_type = ovr.VRApplication_Background if self.args.app_type == "background" else ovr.VRApplication_Overlay
         try:
-            session = ovr.Session(self.args.openvr_lib).init(ovr.VRApplication_Overlay)
+            session = ovr.Session(self.args.openvr_lib).init(app_type)
         except ovr.OpenVRError as e:
             message = str(e)
             if message != self.vr_error_logged:
@@ -219,7 +244,7 @@ class OverlayApp:
             overlay.set_width_meters(main, 1.5)
             overlay.set_input_method(main, ovr.VROverlayInputMethod_Mouse)
             overlay.set_mouse_scale(main, PANEL_W, PANEL_H)
-            if os.path.exists(ICON):
+            if os.path.exists(ICON) and not os.environ.get("FCAM_DEBUG_NO_THUMB"):
                 try:
                     overlay.set_from_file(thumb, ICON)
                 except ovr.OpenVRError as e:
@@ -234,6 +259,8 @@ class OverlayApp:
             return False
         self.session = session
         self.main_handle, self.thumb_handle = main, thumb
+        self.texture_confirmed = False
+        self.was_visible = False
         log.info("SteamVR connected (%s, %s, %s, runtime %s, %s)", session.system.version, session.overlay.version,
                  session.applications.version, session.system.runtime_version(), session.library_path)
         self.redraw(force=True)
@@ -242,11 +269,18 @@ class OverlayApp:
     def disconnect_vr(self):
         if self.session is None:
             return
+        # FCAM_DEBUG_EXIT_MODE: "clear" clears the texture before destroying the overlay (default),
+        # "nodestroy" only shuts the session down, "destroy" destroys without clearing.
+        mode = os.environ.get("FCAM_DEBUG_EXIT_MODE", "clear")
         try:
-            if self.main_handle:
+            if self.main_handle and mode in ("clear", "clear-nodestroy"):
+                self.session.overlay.clear_texture(self.main_handle)
+            if self.main_handle and mode in ("clear", "destroy"):
                 self.session.overlay.destroy_overlay(self.main_handle)
-        except ovr.OpenVRError:
-            pass
+        except ovr.OpenVRError as e:
+            log.debug("overlay teardown: %s", e)
+        if mode.endswith("sleep"):
+            time.sleep(1.0)
         self.session.shutdown()
         self.session = None
         self.main_handle = self.thumb_handle = None
@@ -260,9 +294,21 @@ class OverlayApp:
         snapshot = self.runtime.snapshot()
         version = self.session.system.runtime_version()
         draw_panel(self.panel, snapshot, self.hot_button, version)
+        if os.environ.get("FCAM_DEBUG_NO_TEXTURE"):
+            return True  # diagnostics: keep the overlay without ever uploading a texture
         try:
-            self.session.overlay.set_raw(self.main_handle, self.panel.buf, PANEL_W, PANEL_H)
-        except ovr.OpenVRError as e:
+            if self.args.texture_mode == "raw":
+                self.session.overlay.set_raw(self.main_handle, self.panel.buf, PANEL_W, PANEL_H)
+            else:
+                # SetOverlayFromFile makes SteamVR load the image itself. SetOverlayRaw leaves the
+                # compositor holding a client-owned buffer, and vrcompositor on the Steam Frame
+                # (SteamVR 2.17.10) crashes when that client exits.
+                tmp = self.panel_file + ".tmp"
+                with open(tmp, "wb") as fh:
+                    fh.write(self.panel.to_png())
+                os.replace(tmp, self.panel_file)
+                self.session.overlay.set_from_file(self.main_handle, self.panel_file)
+        except (ovr.OpenVRError, OSError) as e:
             # Happens while the compositor is suspended (headset in standby); log once per episode.
             self.upload_failures += 1
             if self.upload_failed_since is None:
@@ -273,6 +319,13 @@ class OverlayApp:
             log.info("overlay uploads work again after %.0f s (%d failed)",
                      time.monotonic() - self.upload_failed_since, self.upload_failures)
             self.upload_failed_since = None
+        if not self.texture_confirmed:
+            try:
+                width, height = self.session.overlay.texture_size(self.main_handle)
+                log.info("panel texture %dx%d set (%s mode)", width, height, self.args.texture_mode)
+                self.texture_confirmed = True
+            except ovr.OpenVRError as e:
+                log.warning("panel texture not confirmed: %s", e)
         return True
 
     def restart_bridge(self):
@@ -336,8 +389,15 @@ class OverlayApp:
                     now = time.monotonic()
                     if now >= next_redraw:
                         visible = self.session.overlay.is_visible(self.main_handle)
-                        ok = self.redraw()
-                        next_redraw = now + (REDRAW_SECONDS if visible and ok else REDRAW_HIDDEN_SECONDS)
+                        if visible:
+                            ok = self.redraw()  # live updates while the tab is shown
+                            next_redraw = now + (REDRAW_SECONDS if ok else REDRAW_HIDDEN_SECONDS)
+                        elif self.was_visible:
+                            self.redraw()  # one last refresh as the tab goes away; SteamVR keeps the texture
+                            next_redraw = now + REDRAW_SECONDS
+                        else:
+                            next_redraw = now + REDRAW_SECONDS  # hidden: just keep polling visibility
+                        self.was_visible = visible
                 except ovr.OpenVRError as e:
                     log.warning("SteamVR call failed, reconnecting: %s", e)
                     self.disconnect_vr()
@@ -346,6 +406,11 @@ class OverlayApp:
         finally:
             self.disconnect_vr()
             self.runtime.stop()
+            for path in (self.panel_file, self.panel_file + ".tmp"):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
             log.info("FCAM overlay stopped")
 
 
@@ -513,6 +578,11 @@ def main(argv=None):
     parser.add_argument("--status", action="store_true", help="print registration state and exit")
     parser.add_argument("--no-launch", action="store_true", help="with --install: do not start the overlay now")
     parser.add_argument("--openvr-lib", default=None, help="path to libopenvr_api.so (auto-detected)")
+    parser.add_argument("--texture-mode", choices=("file", "raw"), default="file",
+                        help="how the panel reaches SteamVR: 'file' (PNG via SetOverlayFromFile, default) or 'raw' "
+                             "(SetOverlayRaw; crashes the Steam Frame compositor when the overlay exits)")
+    parser.add_argument("--app-type", choices=("overlay", "background"), default="overlay",
+                        help="how to identify to SteamVR (VRApplication_Overlay or _Background)")
     parser.add_argument("--log-file", default=DEFAULT_LOG, help="log file (default: next to this script)")
     args = parser.parse_args(argv)
 

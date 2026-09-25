@@ -197,8 +197,10 @@ class Overlay:
         self._poll_event = table.fn(48, c_bool, c_uint64, POINTER(VREvent_t), c_uint32)
         self._set_input_method = table.fn(50, c_int, c_uint64, c_int)
         self._set_mouse_scale = table.fn(52, c_int, c_uint64, POINTER(HmdVector2_t))
+        self._clear_texture = table.fn(61, c_int, c_uint64)
         self._set_raw = table.fn(62, c_int, c_uint64, c_void_p, c_uint32, c_uint32, c_uint32)
         self._set_from_file = table.fn(63, c_int, c_uint64, c_char_p)
+        self._texture_size = table.fn(66, c_int, c_uint64, POINTER(c_uint32), POINTER(c_uint32))
         self._create_dashboard = table.fn(67, c_int, c_char_p, c_char_p, POINTER(c_uint64), POINTER(c_uint64))
         self._is_dashboard_visible = table.fn(68, c_bool)
         self._is_active_dashboard_overlay = table.fn(69, c_bool, c_uint64)
@@ -273,8 +275,17 @@ class Overlay:
         array = (ctypes.c_ubyte * expected).from_buffer(pixels)
         self._check(self._set_raw(handle, array, width, height, bytes_per_pixel), "SetOverlayRaw")
 
+    def clear_texture(self, handle):
+        self._check(self._clear_texture(handle), "ClearOverlayTexture")
+
     def set_from_file(self, handle, path):
         self._check(self._set_from_file(handle, os.fsencode(path)), "SetOverlayFromFile")
+
+    def texture_size(self, handle):
+        """(width, height) of the overlay's current texture; only the owning process may ask."""
+        width, height = c_uint32(0), c_uint32(0)
+        self._check(self._texture_size(handle, byref(width), byref(height)), "GetOverlayTextureSize")
+        return width.value, height.value
 
     def is_dashboard_visible(self):
         return bool(self._is_dashboard_visible())

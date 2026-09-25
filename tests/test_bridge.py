@@ -224,6 +224,23 @@ class OverlayHelperTests(unittest.TestCase):
         painted = sum(1 for i in range(0, len(panel.buf), 4) if panel.buf[i:i + 4] != background)
         self.assertGreater(painted, 10000)
 
+    def test_panel_png_is_well_formed(self):
+        import zlib
+        panel = fcam_overlay.Panel(8, 4)
+        panel.fill((10, 20, 30, 255))
+        panel.fill((200, 100, 50, 255), 2, 1, 5, 3)
+        png = panel.to_png()
+        self.assertTrue(png.startswith(bytes((137, 80, 78, 71, 13, 10, 26, 10))))
+        self.assertEqual(b"IHDR", png[12:16])
+        width, height, depth, color = struct.unpack(">IIBB", png[16:26])
+        self.assertEqual((8, 4, 8, 6), (width, height, depth, color))
+        idat_len = struct.unpack(">I", png[33:37])[0]
+        self.assertEqual(b"IDAT", png[37:41])
+        raw = zlib.decompress(png[41:41 + idat_len])
+        self.assertEqual(4 * (1 + 8 * 4), len(raw))
+        self.assertEqual(bytes((200, 100, 50, 255)), raw[1 + 33 + 2 * 4:1 + 33 + 3 * 4])
+        self.assertTrue(png.endswith(bytes((73, 69, 78, 68, 174, 66, 96, 130))))
+
     def test_button_hit_test_accepts_both_y_orientations(self):
         self.assertTrue(fcam_overlay.in_button(320, fcam_overlay.PANEL_H - 10))
         self.assertTrue(fcam_overlay.in_button(320, 10))
