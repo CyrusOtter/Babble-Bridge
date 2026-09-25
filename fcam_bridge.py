@@ -54,6 +54,9 @@ ETVR_HEADER = b"\xff\xa0\xff\xa1"
 JPEG_SOI = b"\xff\xd8"
 JPEG_EOI = b"\xff\xd9"
 
+# Espressif USB JTAG/serial debug unit: the ESP32-S3 in the Babble tracker
+DEFAULT_USB_ID = "303a:1001"
+
 __version__ = "0.1.0"
 
 log = logging.getLogger("fcam")
@@ -177,6 +180,58 @@ def split_jpegs(data):
     return frames
 
 
+# ----------------------------------------------------------------------------- device discovery
+
+def find_tracker_ports(usb_id=DEFAULT_USB_ID, usb_serial=None, sysfs="/sys", dev="/dev"):
+    """Serial ports whose USB parent matches vendor:product (and serial, if given), found via sysfs.
+
+    Returns dicts (path, node, serial, product) sorted by node name, so the bridge can follow the
+    tracker when it re-enumerates as a different /dev/ttyACMn.
+    """
+    vendor, _, product_id = usb_id.lower().partition(":")
+    found = []
+    class_tty = os.path.join(sysfs, "class", "tty")
+    try:
+        nodes = sorted(os.listdir(class_tty))
+    except OSError:
+        return found
+    for node in nodes:
+        if not node.startswith(("ttyACM", "ttyUSB")):
+            continue
+        usb_dev = _usb_parent(os.path.join(class_tty, node, "device"))
+        if usb_dev is None:
+            continue
+        if _sysfs_read(usb_dev, "idVendor").lower() != vendor or _sysfs_read(usb_dev, "idProduct").lower() != product_id:
+            continue
+        serial = _sysfs_read(usb_dev, "serial")
+        if usb_serial and serial.lower() != usb_serial.lower():
+            continue
+        found.append({"path": os.path.join(dev, node), "node": node, "serial": serial,
+                      "product": _sysfs_read(usb_dev, "product")})
+    return found
+
+
+def _usb_parent(device_link):
+    """The sysfs directory of the USB device a tty interface belongs to (walks up a few levels)."""
+    path = os.path.realpath(device_link)
+    for _ in range(4):
+        if os.path.exists(os.path.join(path, "idVendor")):
+            return path
+        parent = os.path.dirname(path)
+        if parent == path:
+            break
+        path = parent
+    return None
+
+
+def _sysfs_read(directory, name):
+    try:
+        with open(os.path.join(directory, name), encoding="utf-8", errors="replace") as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
 # ----------------------------------------------------------------------------- frame sources
 
 class FrameQueue:
@@ -206,11 +261,24 @@ class FrameQueue:
 
 
 class SerialSource(threading.Thread):
-    """Reads /dev/ttyACM0 (or a FIFO) and pushes ETVR frames into the queue. Reopens on loss."""
+    """Reads the tracker's serial port (or a FIFO) and pushes ETVR frames into the queue.
 
-    def __init__(self, path, baud, frames, stop_event, log_text):
+    With path "auto" the port is looked up through sysfs by USB vendor:product (and serial) on
+    every open, so the tracker is found again after it re-enumerates as a different /dev/ttyACMn.
+    Reopens on loss.
+    """
+
+    def __init__(self, path, baud, frames, stop_event, log_text, usb_id=DEFAULT_USB_ID, usb_serial=None,
+                 sysfs="/sys", dev="/dev"):
         super().__init__(name="serial-source", daemon=True)
-        self.path = path
+        self.spec = path
+        self.auto = path == "auto"
+        self.path = None if self.auto else path
+        self.usb_id = usb_id
+        self.usb_serial = usb_serial
+        self.sysfs = sysfs
+        self.dev = dev
+        self.device_serial = None  # USB serial of the unit currently (or last) opened
         self.baud = baud
         self.frames = frames
         self.stop = stop_event
@@ -218,10 +286,34 @@ class SerialSource(threading.Thread):
         self.state = "opening"
         self.parser = EtvrParser(self.frames.put, self._on_text)
         self.opens = 0
+        self._waiting_logged = False
 
     @property
     def description(self):
-        return self.path
+        if not self.auto:
+            return self.spec
+        if self.path:
+            return "%s (usb %s serial %s)" % (self.path, self.usb_id, self.device_serial or "?")
+        return "waiting for usb %s%s" % (self.usb_id, " serial " + self.usb_serial if self.usb_serial else "")
+
+    def _discover(self):
+        """Path of the tracker's port, or None. Prefers the unit used last when several match."""
+        ports = find_tracker_ports(self.usb_id, self.usb_serial, self.sysfs, self.dev)
+        if not ports:
+            if not self._waiting_logged:
+                log.warning("no serial port with usb id %s%s; waiting for the tracker", self.usb_id,
+                            " serial " + self.usb_serial if self.usb_serial else "")
+                self._waiting_logged = True
+            return None
+        self._waiting_logged = False
+        choice = next((p for p in ports if p["serial"] == self.device_serial), ports[0])
+        if len(ports) > 1:
+            log.info("%d ports match usb id %s, using %s", len(ports), self.usb_id, choice["path"])
+        if choice["path"] != self.path or choice["serial"] != self.device_serial:
+            log.info("tracker %s (serial %s) is at %s", choice["product"] or self.usb_id, choice["serial"] or "?",
+                     choice["path"])
+        self.device_serial = choice["serial"]
+        return choice["path"]
 
     def run(self):
         while not self.stop.is_set():
@@ -240,25 +332,30 @@ class SerialSource(threading.Thread):
                     pass
             if not self.stop.is_set():
                 self.state = "no-source"
-                log.warning("%s closed, waiting for it to come back", self.path)
+                log.warning("%s closed, waiting for it to come back", self.path or self.spec)
                 self.stop.wait(1.5)  # a re-enumerating USB device needs a moment before its node is back
 
     def _open(self):
+        path = self._discover() if self.auto else self.spec
+        if path is None:
+            return None
         try:
-            fd = os.open(self.path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+            fd = os.open(path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
         except OSError as e:
             if self.state != "no-source":
-                log.warning("cannot open %s: %s", self.path, e.strerror)
+                log.warning("cannot open %s: %s", path, e.strerror)
             return None
         try:
             if os.isatty(fd):
                 self._configure_tty(fd)
         except Exception as e:  # report and retry later
-            log.error("cannot configure %s: %s", self.path, e)
+            log.error("cannot configure %s: %s", path, e)
             os.close(fd)
             return None
+        self.path = path
         self.opens += 1
-        log.info("opened %s (%s, %d baud)", self.path, "tty" if os.isatty(fd) else "stream", self.baud)
+        log.info("opened %s (%s, %d baud)%s", path, "tty" if os.isatty(fd) else "stream", self.baud,
+                 " usb serial %s" % self.device_serial if self.auto and self.device_serial else "")
         return fd
 
     def _configure_tty(self, fd):
@@ -541,7 +638,8 @@ def build_source(args, frames, stop_event):
         pass
     if is_regular_file:
         return ReplaySource(args.serial, args.replay_fps, frames, stop_event)
-    return SerialSource(args.serial, args.baud, frames, stop_event, args.log_tracker_text)
+    return SerialSource(args.serial, args.baud, frames, stop_event, args.log_tracker_text,
+                        usb_id=args.usb_id, usb_serial=args.usb_serial)
 
 
 class BridgeRuntime:
@@ -585,8 +683,13 @@ class BridgeRuntime:
 
 def build_parser():
     p = argparse.ArgumentParser(description="Forward a serial Babble tracker to Baballonia over FCAM/UDP.")
-    p.add_argument("--serial", default="/dev/ttyACM0",
-                   help="serial device, FIFO, or a recorded file to replay (default: /dev/ttyACM0)")
+    p.add_argument("--serial", default="auto",
+                   help="'auto' = find the tracker by USB id via sysfs on every open (default); or a serial "
+                        "device, FIFO, or a recorded file to replay")
+    p.add_argument("--usb-id", default=DEFAULT_USB_ID, metavar="VID:PID",
+                   help="USB vendor:product to look for with --serial auto (default: %s)" % DEFAULT_USB_ID)
+    p.add_argument("--usb-serial", default=None, metavar="SERIAL",
+                   help="only use the tracker with this USB serial number (when several are plugged in)")
     p.add_argument("--baud", type=int, default=3000000, help="serial baud rate (default: 3000000)")
     p.add_argument("--listen", default="0.0.0.0:%d" % DEFAULT_PORT,
                    help="UDP address to receive SUBSCRIBE datagrams on (default: 0.0.0.0:%d)" % DEFAULT_PORT)

@@ -68,6 +68,66 @@ class EtvrParserTests(unittest.TestCase):
         self.assertEqual([FAKE_JPEG, FAKE_JPEG], fcam_bridge.split_jpegs(raw))
 
 
+class DiscoveryTests(unittest.TestCase):
+    @staticmethod
+    def make_sysfs(root, nodes):
+        """Fake sysfs: class/tty/<node>/device is a plain directory and the USB attributes live
+        one level up, which exercises the same walk-up as the real interface/device layout."""
+        for name, vid, pid, serial, product in nodes:
+            base = os.path.join(root, "class", "tty", name)
+            os.makedirs(os.path.join(base, "device"))
+            if vid:
+                for key, value in (("idVendor", vid), ("idProduct", pid), ("serial", serial), ("product", product)):
+                    with open(os.path.join(base, key), "w") as fh:
+                        fh.write(value + "\n")
+
+    def test_finds_ports_by_usb_id_and_serial(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sysfs, dev = os.path.join(tmp, "sys"), os.path.join(tmp, "dev")
+            self.make_sysfs(sysfs, [
+                ("ttyACM0", "2341", "0043", "ARD1", "Arduino Uno"),
+                ("ttyACM2", "303a", "1001", "AA:BB:CC:DD:EE:01", "USB JTAG/serial debug unit"),
+                ("ttyACM1", "303A", "1001", "AA:BB:CC:DD:EE:02", "USB JTAG/serial debug unit"),
+                ("ttyS0", None, None, None, None),
+                ("ttyUSB0", "303a", "1001", "", "USB JTAG/serial debug unit"),
+            ])
+            ports = fcam_bridge.find_tracker_ports(sysfs=sysfs, dev=dev)
+            self.assertEqual(["ttyACM1", "ttyACM2", "ttyUSB0"], [p["node"] for p in ports])
+            self.assertEqual(os.path.join(dev, "ttyACM1"), ports[0]["path"])
+            self.assertEqual("USB JTAG/serial debug unit", ports[0]["product"])
+            pinned = fcam_bridge.find_tracker_ports(usb_serial="aa:bb:cc:dd:ee:01", sysfs=sysfs, dev=dev)
+            self.assertEqual(["ttyACM2"], [p["node"] for p in pinned])
+            self.assertEqual([], fcam_bridge.find_tracker_ports(usb_id="1234:5678", sysfs=sysfs, dev=dev))
+            self.assertEqual([], fcam_bridge.find_tracker_ports(sysfs=os.path.join(tmp, "missing"), dev=dev))
+
+    def test_auto_source_follows_the_unit_it_used(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sysfs, dev = os.path.join(tmp, "sys"), os.path.join(tmp, "dev")
+            wake_r, wake_w = socket.socketpair()
+            self.addCleanup(wake_r.close)
+            self.addCleanup(wake_w.close)
+            frames = fcam_bridge.FrameQueue(wake_w)
+            source = fcam_bridge.SerialSource("auto", 3000000, frames, __import__("threading").Event(), False,
+                                              sysfs=sysfs, dev=dev)
+            self.assertIsNone(source._discover())  # nothing plugged in
+            self.assertTrue(source.description.startswith("waiting for usb 303a:1001"))
+            self.make_sysfs(sysfs, [("ttyACM0", "303a", "1001", "UNIT-A", "tracker")])
+            self.assertEqual(os.path.join(dev, "ttyACM0"), source._discover())
+            self.assertEqual("UNIT-A", source.device_serial)
+            # the tracker re-enumerates as ttyACM1 while another unit takes ttyACM0
+            import shutil
+            shutil.rmtree(os.path.join(sysfs, "class", "tty", "ttyACM0"))
+            self.make_sysfs(sysfs, [("ttyACM0", "303a", "1001", "UNIT-B", "tracker"),
+                                    ("ttyACM1", "303a", "1001", "UNIT-A", "tracker")])
+            self.assertEqual(os.path.join(dev, "ttyACM1"), source._discover())
+
+    def test_serial_defaults_to_auto(self):
+        args = fcam_bridge.build_parser().parse_args([])
+        self.assertEqual("auto", args.serial)
+        self.assertEqual("303a:1001", args.usb_id)
+        self.assertIsNone(args.usb_serial)
+
+
 class ProtocolTests(unittest.TestCase):
     def test_header_round_trip(self):
         header = fcam_bridge.pack_header(fcam_bridge.TYPE_FRAME, fcam_bridge.CODEC_JPEG, 0, 65535, 3, 7, 1400,

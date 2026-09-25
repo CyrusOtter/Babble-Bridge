@@ -34,7 +34,7 @@ FCAM overlay installed in $dest.
   remove:  python3 $dest/fcam_overlay.py --uninstall
   Babble face camera address: fcam://${ip:-<headset-ip>}:8555
 MSG
-if ! [ -e /dev/ttyACM0 ]; then
-    echo "  no /dev/ttyACM0 right now: if the tracker is plugged in, build the driver with"
+if ! ls /dev/ttyACM* >/dev/null 2>&1; then
+    echo "  no /dev/ttyACM* right now: if the tracker is plugged in, build the driver with"
     echo "    bash $here/../build-cdc-acm.sh --load"
 fi

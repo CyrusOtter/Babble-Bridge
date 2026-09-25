@@ -140,7 +140,7 @@ def draw_panel(panel, snapshot, hot_button, vr_version):
     state = snapshot.get("state", "?")
     state_color = {"streaming": OK, "opening": WARN, "no-source": BAD, "stopping": DIM}.get(state, DIM)
     state_text = {"streaming": "tracker streaming", "opening": "opening tracker",
-                  "no-source": "no tracker on " + snapshot.get("source", "?"), "stopping": "stopping"}.get(state, state)
+                  "no-source": "no tracker (" + snapshot.get("source", "?") + ")", "stopping": "stopping"}.get(state, state)
     panel.text(32, 90, state_text, state_color, scale=1)
 
     rows = [

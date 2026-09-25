@@ -126,11 +126,19 @@ plus `--target <pc-ip>` on the bridge) needs an inbound UDP rule.
 ## Bridge options
 
 ```
-python3 fcam_bridge.py [--serial /dev/ttyACM0] [--baud 3000000]
-                       [--listen 0.0.0.0:8555] [--target PC[:PORT]]...
+python3 fcam_bridge.py [--serial auto|/dev/ttyACMn|FILE] [--usb-id 303a:1001] [--usb-serial S]
+                       [--baud 3000000] [--listen 0.0.0.0:8555] [--target PC[:PORT]]...
                        [--chunk 1400] [--sub-ttl 3] [--status-interval 1]
                        [--stats SECONDS] [--log-tracker-text] [-v]
 ```
+
+**Device discovery.** `--serial auto` (the default) looks the tracker up through
+sysfs by USB vendor:product (`303a:1001`, the ESP32-S3 in the Babble tracker) on
+every open, so it does not matter whether the port shows up as `/dev/ttyACM0`
+or, after the tracker re-enumerated, as `/dev/ttyACM1`. When several matching
+devices are plugged in, the unit used last is preferred and `--usb-serial`
+pins one. A fixed path still works: `/dev/babble-tracker` (from the udev rule)
+or `/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_<serial>-if00`.
 
 `fcam_overlay.py` accepts the same options plus `--install`, `--uninstall`,
 `--status`, `--no-launch`, `--openvr-lib`, `--log-file`. The manifest launches it
@@ -198,6 +206,6 @@ fetch without credentials.
 | `Permission denied` on the port | Install the udev rule (adds the `uaccess` tag) or `sudo chmod 660 /dev/ttyACM0` for a quick test. |
 | Babble stays on "connecting", no `subscriber ... joined` in the log | PC and headset are not on the same network, or the address is wrong. |
 | Subscriber joins, no frames, status says `no-source` | The tracker is not streaming over USB. Stock Babble/OpenIris firmware streams serial only when it is not in Wi-Fi streaming mode. |
-| `/dev/ttyACM0 closed, waiting for it to come back` repeatedly | The tracker is re-enumerating on USB (power, hub or cable). The bridge reopens it by itself. |
+| `... closed, waiting for it to come back` repeatedly | The tracker is re-enumerating on USB (power, hub or cable). The bridge finds it again by USB id, whichever `ttyACMn` it gets. |
 | `overlay upload failed ... RequestFailed` once | SteamVR's compositor is in standby (headset off). Uploads resume when it wakes. |
 | Bridge stops after headset standby | Expected when SteamVR shuts down; it is relaunched when SteamVR starts. |

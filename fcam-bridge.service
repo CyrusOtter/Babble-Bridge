@@ -3,7 +3,7 @@ Description=FCAM bridge: Babble face tracker on /dev/ttyACM0 -> Baballonia over 
 Documentation=https://git.ott-labs.de/OTT-Labs/Babble-Bridge
 
 [Service]
-ExecStart=/usr/bin/python3 %h/fcam/fcam_bridge.py --serial /dev/ttyACM0 --listen 0.0.0.0:8555 --stats 60
+ExecStart=/usr/bin/python3 %h/fcam/fcam_bridge.py --listen 0.0.0.0:8555 --stats 60
 Restart=always
 RestartSec=2
 Nice=-5
