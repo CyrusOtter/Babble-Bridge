@@ -115,7 +115,7 @@ class BridgeEndToEndTests(unittest.TestCase):
                 complete = []
                 deadline = time.monotonic() + 3.0
                 next_sub = 0.0
-                while time.monotonic() < deadline and len(complete) < 10:
+                while time.monotonic() < deadline and (len(complete) < 10 or not statuses):
                     if time.monotonic() >= next_sub:
                         client.sendto(subscribe, ("127.0.0.1", port))
                         next_sub = time.monotonic() + 0.5
