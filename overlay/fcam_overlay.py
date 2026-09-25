@@ -260,6 +260,8 @@ class OverlayApp:
         self.session = session
         self.main_handle, self.thumb_handle = main, thumb
         self.texture_confirmed = False
+        self.texture_warned = False
+        self.last_upload = 0.0
         self.was_visible = False
         log.info("SteamVR connected (%s, %s, %s, runtime %s, %s)", session.system.version, session.overlay.version,
                  session.applications.version, session.system.runtime_version(), session.library_path)
@@ -319,14 +321,24 @@ class OverlayApp:
             log.info("overlay uploads work again after %.0f s (%d failed)",
                      time.monotonic() - self.upload_failed_since, self.upload_failures)
             self.upload_failed_since = None
-        if not self.texture_confirmed:
-            try:
-                width, height = self.session.overlay.texture_size(self.main_handle)
-                log.info("panel texture %dx%d set (%s mode)", width, height, self.args.texture_mode)
-                self.texture_confirmed = True
-            except ovr.OpenVRError as e:
-                log.warning("panel texture not confirmed: %s", e)
+        self.last_upload = time.monotonic()
         return True
+
+    def confirm_texture(self):
+        """SteamVR loads SetOverlayFromFile images asynchronously; ask for the size a moment later."""
+        if self.texture_confirmed or self.session is None or not self.last_upload:
+            return
+        age = time.monotonic() - self.last_upload
+        if age < 1.0:
+            return
+        try:
+            width, height = self.session.overlay.texture_size(self.main_handle)
+            log.info("panel texture %dx%d set (%s mode)", width, height, self.args.texture_mode)
+            self.texture_confirmed = True
+        except ovr.OpenVRError as e:
+            if age > 10.0 and not self.texture_warned:
+                log.warning("panel texture still not confirmed after %.0f s: %s", age, e)
+                self.texture_warned = True
 
     def restart_bridge(self):
         log.info("restarting bridge on request")
@@ -387,6 +399,7 @@ class OverlayApp:
                     if not self.handle_events():
                         break
                     now = time.monotonic()
+                    self.confirm_texture()
                     if now >= next_redraw:
                         visible = self.session.overlay.is_visible(self.main_handle)
                         if visible:
