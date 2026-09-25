@@ -1,0 +1,20 @@
+{
+	"source": "builtin",
+	"applications": [
+		{
+			"app_key": "ottlabs.fcam",
+			"launch_type": "binary",
+			"binary_path_linux": "fcam_overlay.sh",
+			"binary_path_linux_arm": "fcam_overlay.sh",
+			"arguments": "",
+			"is_dashboard_overlay": true,
+			"image_path": "icon.png",
+			"strings": {
+				"en_us": {
+					"name": "FCAM Bridge",
+					"description": "Streams the Babble face tracker on the headset's USB-C port to Baballonia on the PC"
+				}
+			}
+		}
+	]
+}

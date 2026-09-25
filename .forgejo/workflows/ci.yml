@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ "v*" ]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Byte-compile
+        run: |
+          python3 --version
+          python3 -m py_compile fcam_bridge.py overlay/fcam_overlay.py overlay/openvr_min.py overlay/fcam_font.py
+
+      - name: Unit tests
+        run: python3 -m unittest discover -s tests -v
+
+  release:
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          apt-get update -qq && apt-get install -y -qq jq
+          # dl.min.io is gone (410, project archived) - pull mc from the GitHub release
+          MC_RELEASE=RELEASE.2025-08-13T08-35-41Z
+          curl -fsSL "https://github.com/minio/mc/releases/download/${MC_RELEASE}/mc.linux-amd64.${MC_RELEASE}" -o /usr/local/bin/mc
+          chmod +x /usr/local/bin/mc
+
+      - name: Build tarball
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          CODE_VERSION=$(python3 -c "import fcam_bridge; print(fcam_bridge.__version__)")
+          if [ "$CODE_VERSION" != "$VERSION" ]; then
+            echo "fcam_bridge.__version__ is $CODE_VERSION but the tag is $VERSION" >&2
+            exit 1
+          fi
+          NAME="babble-bridge-${VERSION}"
+          mkdir -p "dist/${NAME}"
+          cp -r fcam_bridge.py fcam-bridge.service 90-babble-tracker.rules install-headset.sh \
+                overlay README.md PROTOCOL.md "dist/${NAME}/"
+          rm -rf "dist/${NAME}/overlay/__pycache__"
+          tar -C dist -czf "${NAME}.tar.gz" "${NAME}"
+          sha256sum "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256"
+          {
+            echo "NAME=${NAME}"
+            echo "VERSION=${VERSION}"
+            echo "S3_URL=${{ vars.S3_ENDPOINT }}/${{ vars.S3_BUCKET }}/babble-bridge/${VERSION}/${NAME}.tar.gz"
+          } >> "$GITHUB_ENV"
+
+      # action-gh-release replaces same-name assets via a GitHub-only endpoint that Forgejo
+      # does not implement, so stale assets of a re-released tag are removed first.
+      - name: Delete stale release assets
+        run: |
+          api="${{ github.server_url }}/api/v1/repos/${{ github.repository }}"
+          auth="Authorization: token ${{ secrets.GITHUB_TOKEN }}"
+          rel=$(curl -s -H "$auth" "$api/releases/tags/${GITHUB_REF_NAME}")
+          rid=$(echo "$rel" | jq -r '.id // empty')
+          if [ -n "$rid" ]; then
+            for aid in $(echo "$rel" | jq -r '.assets[].id'); do
+              curl -s -X DELETE -H "$auth" "$api/releases/$rid/assets/$aid"
+            done
+          fi
+
+      - name: Upload to S3 (public download for the headset)
+        env:
+          S3_ENDPOINT:   ${{ vars.S3_ENDPOINT }}
+          S3_BUCKET:     ${{ vars.S3_BUCKET }}
+          S3_ACCESS_KEY: ${{ secrets.S3_ACCESS_KEY }}
+          S3_SECRET_KEY: ${{ secrets.S3_SECRET_KEY }}
+        run: |
+          : "${S3_ENDPOINT:?S3_ENDPOINT var is not set on the Forgejo org}"
+          : "${S3_BUCKET:?S3_BUCKET var is not set on the Forgejo org}"
+          : "${S3_ACCESS_KEY:?S3_ACCESS_KEY secret is not set on the Forgejo org}"
+          : "${S3_SECRET_KEY:?S3_SECRET_KEY secret is not set on the Forgejo org}"
+          mc alias set ott "$S3_ENDPOINT" "$S3_ACCESS_KEY" "$S3_SECRET_KEY"
+          mc cp "${NAME}.tar.gz" "ott/${S3_BUCKET}/babble-bridge/${VERSION}/${NAME}.tar.gz"
+          mc cp "${NAME}.tar.gz.sha256" "ott/${S3_BUCKET}/babble-bridge/${VERSION}/${NAME}.tar.gz.sha256"
+          echo "Uploaded to ${S3_URL}"
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          files: |
+            ${{ env.NAME }}.tar.gz
+            ${{ env.NAME }}.tar.gz.sha256
+          body: |
+            FCAM bridge ${{ env.VERSION }} for the Steam Frame.
+
+            Install on the headset (as `steamos`):
+
+            ```
+            curl -fsSL ${{ env.S3_URL }} | tar xz
+            bash ${{ env.NAME }}/overlay/install-overlay.sh
+            ```
+
+            Then enter `fcam://<headset-ip>:8555` as the face camera address in Babble.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
