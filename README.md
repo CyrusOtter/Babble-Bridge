@@ -21,6 +21,12 @@ rate, connected clients, the address to enter in Babble and a "Restart bridge"
 button. Everything is Python standard library only; nothing has to be installed
 on the headset.
 
+![The FCAM Bridge tab in the SteamVR dashboard](docs/overlay-panel.png)
+
+*The FCAM Bridge tab with a tracker streaming to one Babble client (default file texture
+mode). Rendered with the overlay's own drawing code by `overlay/tools/render_screenshot.py`;
+on the headset it is a 1.5 m wide panel in the SteamVR dashboard.*
+
 ## What you need on the headset
 
 - SSH access as `steamos` (Developer mode).
@@ -460,6 +466,7 @@ default 30), which is how the bridge is tested without a headset.
 | `overlay/fcam.vrmanifest`, `overlay/fcam_overlay.sh` | SteamVR application manifest (`binary_path_linux_arm`) and its launcher. |
 | `overlay/install-overlay.sh` | Installer (no root). |
 | `overlay/tools/dmabuf_probe.py` | Diagnostic: dmabuf formats/modifiers SteamVR offers (see known issues). |
+| `overlay/tools/render_screenshot.py`, `docs/overlay-panel.png` | Renders the README screenshot of the dashboard panel. |
 | `overlay/tools/gl_exit_test.sh` | On-headset exit test of the GL texture path (blocks A-D and F, see above). |
 | `overlay/tools/gen_openvr_indices.py` | Prints the OpenVR function-table positions from `openvr_capi.h`, to re-check `openvr_min.py`. |
 | `fcam-bridge.service`, `install-headset.sh` | systemd alternative. |
