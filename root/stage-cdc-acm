@@ -1,0 +1,284 @@
+#!/bin/bash
+# /var/lib/babble-tracker/stage-cdc-acm  (root:root 0755)
+# Installed by Babble-Bridge root/install-cdc-acm-loader.sh. Run it with sudo; `bash
+# build-cdc-acm.sh --install` does that for you:
+#
+#   sudo /var/lib/babble-tracker/stage-cdc-acm --headers VERSION [--yes] < ~/cdc-acm/cdc-acm.ko
+#   sudo /var/lib/babble-tracker/stage-cdc-acm --rearm
+#
+# The first form copies a cdc-acm.ko built as steamos into the root-owned store
+# /var/lib/babble-tracker/by-kernel/<uname -r>/, loads it once through babble-cdc-acm.service (same
+# checks and sandbox as at boot) and only then enables that unit for boot. The module comes in on
+# STANDARD INPUT: the steamos shell opens the file with its own rights, root never opens a
+# user-controlled path, and every check looks only at root's private copy. VERSION is the
+# linux-*-deckard-headers release the module was built against (build-cdc-acm.sh writes it to
+# ~/cdc-acm/cdc-acm.headers); it must equal the installed kernel package.
+#
+# Before anything changes it prints the sha256 of the copy it received and asks on the terminal
+# (--yes skips the question). Compare it with the sha256 build-cdc-acm.sh printed: that catches a
+# wrong file, or one replaced after the build. It is no defence against a program running as
+# steamos that controls the build itself (it can change both); that risk comes with building as
+# steamos (build from a fresh ssh -t session).
+#
+# --rearm loads the module already staged for this kernel and enables the unit again: after it was
+# left disarmed because cdc_acm was in use, after an interrupted load, or to test an updated loader.
+# It refuses a module staged on another build of the same kernel release (the unit skips that one):
+# build and stage it again.
+#
+# Neither form touches the staged build or the unit while cdc_acm is loaded and in use (a process
+# holds a tracker port): it could not be unloaded to test the build, so the build that is armed now
+# stays armed. (Run by install-cdc-acm-loader.sh, that installer may have changed its own files
+# before; it says so.)
+#
+# The password prompt is the point. This kernel has no module signing and no lockdown, so the sudo
+# password is the only thing that keeps code running as steamos out of the kernel. Never add a
+# NOPASSWD sudoers entry or a polkit rule for this script.
+set -euo pipefail
+export PATH=/usr/bin LC_ALL=C
+umask 022
+shopt -s nullglob
+
+STORE=/var/lib/babble-tracker
+SELF="$STORE/stage-cdc-acm"
+UNIT=babble-cdc-acm.service
+MAX_BYTES=$((16 * 1024 * 1024))
+HINT="as steamos: bash <your Babble-Bridge copy>/build-cdc-acm.sh --install"
+FREE_PORT="unplug the tracker, or stop the FCAM overlay that holds its port with python3 ~/fcam/fcam_overlay.py --stop (it refuses an instance that may use raw mode, which must not be stopped: then unplug the tracker) and start it again afterwards with python3 ~/fcam/fcam_overlay.py --start"
+
+die() { echo "stage-cdc-acm: $*" >&2; exit 1; }
+usage() { die "usage: sudo $SELF --headers VERSION [--yes] < ~/cdc-acm/cdc-acm.ko   or   sudo $SELF --rearm"; }
+
+[ "$(id -u)" = 0 ] || die "run it with sudo"
+MODE=""
+HEADERS=""
+YES=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --headers) { [ $# -ge 2 ] && [ -z "$MODE" ]; } || usage; MODE=stage; HEADERS="$2"; shift ;;
+        --rearm) [ -z "$MODE" ] || usage; MODE=rearm ;;
+        --yes) YES=1 ;;
+        *) usage ;;
+    esac
+    shift
+done
+[ -n "$MODE" ] || usage
+if [ "$MODE" = rearm ]; then
+    AGAIN="run: sudo $SELF --rearm"
+else
+    AGAIN="stage it again ($HINT)"
+fi
+{ [ -x "$STORE/load-cdc-acm" ] && [ -f "/etc/systemd/system/$UNIT" ]; } ||
+    die "the loader is not installed: sudo /usr/bin/bash <your Babble-Bridge copy>/root/install-cdc-acm-loader.sh"
+
+KVER="$(uname -r)"
+[[ "$KVER" =~ ^[A-Za-z0-9._+-]+$ ]] || die "unexpected kernel release '$KVER'"
+DIR="$STORE/by-kernel/$KVER"
+
+# absent, live, builtin (part of the kernel: no initstate), or coming/going: a load or unload that
+# never finished (e.g. the module's init crashed; the kernel creates the directory before the init).
+module_state() {
+    local state
+    if [ ! -d /sys/module/cdc_acm ]; then
+        echo absent
+        return
+    fi
+    state="$(cat /sys/module/cdc_acm/initstate 2>/dev/null)" || state=builtin
+    echo "${state:-unknown}"
+}
+# What systemctl says about the unit: enabled (armed for boot), disabled, ... or nothing at all
+# when it cannot tell (which never counts as disarmed).
+unit_enabled() { systemctl is-enabled "$UNIT" 2>/dev/null || true; }
+# Disarms the unit and checks that it took effect: everything after it relies on the unit being
+# disarmed, so a disarm that cannot be confirmed stops here ($1: what that leaves behind). The
+# disable may have worked even so (only the check failed): the message does not claim either.
+disarm() {
+    local state
+    systemctl disable --quiet "$UNIT" 2>/dev/null || true
+    state="$(unit_enabled)"
+    [ "$state" = disabled ] ||
+        die "cannot confirm that $UNIT is disarmed (systemctl is-enabled says '${state:-nothing}'), so it may or may not still be armed for boot (check: systemctl is-enabled $UNIT). $1"
+}
+
+# Stops before anything changes when the driver loaded now cannot be unloaded for the test: the
+# unit and the staged build stay as they are.
+require_unloadable() {
+    local state refcnt
+    state="$(module_state)"
+    case "$state" in
+        absent) return 0 ;;
+        live) ;;
+        builtin) die "cdc_acm is built into kernel $KVER; nothing to stage (remove the loader: sudo /usr/bin/bash <your Babble-Bridge copy>/root/install-cdc-acm-loader.sh --uninstall)" ;;
+        *) die "cdc_acm is stuck in state '$state' (did a load crash? journalctl -k -b). The staged build and $UNIT were left as they were; reboot, then $AGAIN" ;;
+    esac
+    refcnt="$(cat /sys/module/cdc_acm/refcnt 2>/dev/null)" || return 0   # rmmod will tell
+    if [ "$refcnt" != 0 ]; then
+        die "cdc_acm is in use (refcnt $refcnt) and cannot be unloaded to test the build. The staged build and $UNIT were left as they were ($UNIT is $(unit_enabled)). To go ahead, $FREE_PORT, then $AGAIN"
+    fi
+}
+
+# The sha256 printed before this is only worth something if it is compared before the module is
+# loaded: ask on the terminal (standard input holds the module).
+confirm() {
+    local answer=""
+    [ "$YES" = 0 ] || return 0
+    printf '%s' "Stage this module, load it and arm it for boot? Compare the sha256 above with the one the build printed first. [y/N] " >&2
+    read -r answer 2>/dev/null </dev/tty || answer=""
+    case "$answer" in
+        y|Y|yes|YES) ;;
+        *) die "not confirmed; the staged build and $UNIT were left as they were (without a terminal: compare the sha256, then pass --yes)" ;;
+    esac
+}
+
+# Loads the staged module once through the unit and enables the unit only if that worked: a build
+# that fails or crashes on load is never armed for boot. $1=1: the staged build is the same one that
+# was armed before this run (it stays armed if cdc_acm cannot be unloaded after all).
+load_and_arm() {
+    local same="${1:-0}" state ports
+    state="$(module_state)"
+    if [ "$state" = live ]; then
+        echo "cdc_acm is loaded; unloading it so the staged build can be tested through $UNIT"
+        if ! rmmod cdc_acm; then
+            if [ "$MODE" = rearm ]; then
+                die "cdc_acm is in use and stays loaded; the staged build and $UNIT were left as they were ($UNIT is $(unit_enabled)). To go ahead, $FREE_PORT, then run: sudo $SELF --rearm"
+            fi
+            if [ "$same" = 1 ]; then
+                systemctl enable --quiet "$UNIT" || true
+                die "cdc_acm is in use and stays loaded. The staged build is the same as before and stays armed ($(unit_enabled)); to test it through the unit, $FREE_PORT, then run: sudo $SELF --rearm"
+            fi
+            die "cdc_acm is in use and stays loaded. The build is staged, but $UNIT is $(unit_enabled): it is not armed for boot. To go ahead, $FREE_PORT, then run: sudo $SELF --rearm"
+        fi
+    elif [ "$state" != absent ]; then
+        die "cdc_acm is stuck in state '$state' (journalctl -k -b); reboot, then run: sudo $SELF --rearm"
+    fi
+    # From here on the unit stays disarmed unless the staged build loads through it.
+    disarm "cdc_acm is not loaded now, and the staged build was not tested; run: sudo $SELF --rearm once systemctl answers, or reboot"
+    rm -f -- "$STORE/state/load-attempt"
+    systemctl reset-failed "$UNIT" 2>/dev/null || true
+    systemctl restart "$UNIT" || true
+    # Both: the unit ran load-cdc-acm to the end (not skipped by its conditions, not failed), and
+    # the driver is live now (a module whose init crashed stays "coming").
+    if ! systemctl is-active --quiet "$UNIT" || [ "$(module_state)" != live ]; then
+        journalctl -b -u "$UNIT" -n 15 --no-pager -o cat 2>/dev/null || true
+        die "the staged module did not load through $UNIT (cdc_acm is $(module_state)), so it is not armed for boot ($UNIT is $(unit_enabled))"
+    fi
+    systemctl enable --quiet "$UNIT" ||
+        die "systemctl enable $UNIT failed: cdc_acm is loaded now, and $UNIT is $(unit_enabled) for boot"
+    echo "cdc_acm loaded from $DIR; $UNIT is armed for every boot of this kernel build"
+    udevadm settle --timeout=5 2>/dev/null || true
+    ports=(/dev/ttyACM*)
+    if [ "${#ports[@]}" -gt 0 ]; then
+        ls -l -- "${ports[@]}" 2>/dev/null || true
+        if [ -e /dev/babble-tracker ]; then
+            ls -l /dev/babble-tracker 2>/dev/null || true
+        fi
+    else
+        echo "no /dev/ttyACM* yet: plug the tracker in"
+    fi
+}
+
+# --rearm can only work with a module staged on exactly this kernel build: the unit skips any other.
+if [ "$MODE" = rearm ]; then
+    [ -f "$DIR/cdc-acm.ko" ] || die "nothing is staged for kernel $KVER ($HINT)"
+    staged_build="$(cat -- "$DIR/kernel-build" 2>/dev/null || true)"
+    [ "$staged_build" = "$(uname -v)" ] ||
+        die "the module in $DIR was staged on another build of kernel $KVER ('$staged_build', running '$(uname -v)'), which the unit skips; --rearm cannot help. Build and stage it again ($HINT)"
+fi
+
+require_unloadable
+
+if [ "$MODE" = rearm ]; then
+    load_and_arm
+    exit 0
+fi
+
+[ ! -t 0 ] || die "pass the module on standard input: sudo $SELF --headers VERSION < ~/cdc-acm/cdc-acm.ko"
+[[ "$HEADERS" =~ ^[A-Za-z0-9._+:~-]+$ ]] || die "unexpected --headers value '$HEADERS'"
+
+# The package that ships the running kernel, from this slot's read-only rootfs and package database.
+pkgbase="$(cat "/usr/lib/modules/$KVER/pkgbase" 2>/dev/null || true)"
+[ -n "$pkgbase" ] || pkgbase="$(pacman -Qqo "/usr/lib/modules/$KVER/modules.order" 2>/dev/null || true)"
+[[ "$pkgbase" =~ ^[a-z0-9][a-z0-9._+-]*$ ]] || die "cannot tell which package ships kernel $KVER"
+kpkgver="$(pacman -Q "$pkgbase" 2>/dev/null | awk '{print $2}' || true)"
+[ -n "$kpkgver" ] || die "pacman does not list $pkgbase"
+[ "$HEADERS" = "$kpkgver" ] ||
+    die "the module was built against $pkgbase-headers $HEADERS, but the installed kernel is $kpkgver; as steamos: bash <your Babble-Bridge copy>/build-cdc-acm.sh --refresh --install"
+
+ref="$(find "/usr/lib/modules/$KVER/kernel" -type f -name '*.ko*' -print -quit 2>/dev/null || true)"
+[ -n "$ref" ] || die "no in-tree module under /usr/lib/modules/$KVER/kernel to take the vermagic from"
+want_magic="$(modinfo -F vermagic "$ref" 2>/dev/null || true)"
+[ -n "$want_magic" ] || die "cannot read the vermagic of $ref"
+
+install -d -o root -g root -m 0755 "$STORE" "$STORE/by-kernel"
+work="$(mktemp -d "$STORE/by-kernel/.stage.XXXXXX")"      # root-only (0700) until every check passed
+trap 'rm -rf -- "$work"' EXIT
+ko="$work/cdc-acm.ko"                                      # modinfo only reads paths ending in .ko
+
+# Bounded read into the private copy; everything below looks only at this copy.
+head -c $((MAX_BYTES + 1)) > "$ko"
+size="$(stat -c %s -- "$ko")"
+[ "$size" -gt 0 ] || die "standard input was empty"
+[ "$size" -le "$MAX_BYTES" ] || die "input is larger than $MAX_BYTES bytes; not a cdc-acm module"
+elf() { od -An -tx1 -j "$1" -N "$2" -- "$ko" 2>/dev/null | tr -d ' \n'; }
+[ "$(elf 0 4)" = 7f454c46 ] || die "input is not an ELF file"
+[ "$(elf 4 2)" = 0201 ] || die "input is not a 64-bit little-endian ELF file"
+[ "$(elf 16 2)" = 0100 ] || die "input is not a relocatable object (kernel modules are ET_REL)"
+[ "$(elf 18 2)" = b700 ] || die "input is not an aarch64 object"
+name="$(modinfo -F name "$ko" 2>/dev/null || true)"
+magic="$(modinfo -F vermagic "$ko" 2>/dev/null || true)"
+deps="$(modinfo -F depends "$ko" 2>/dev/null || true)"
+[ "$name" = cdc_acm ] || die "module name is '$name', expected cdc_acm"
+[ "$magic" = "$want_magic" ] ||
+    die "vermagic '$magic' does not match the running kernel's modules ('$want_magic'); $HINT"
+[ -z "$deps" ] || die "the module depends on '$deps'; only a dependency-free cdc_acm is accepted"
+
+sum="$(sha256sum -- "$ko" | cut -d' ' -f1)"
+echo "$sum  cdc-acm.ko" > "$work/cdc-acm.ko.sha256"
+uname -v > "$work/kernel-build"
+echo "$pkgbase $kpkgver (module built against $pkgbase-headers $HEADERS)" > "$work/kernel-package"
+chown -R root:root -- "$work"
+chmod 0644 -- "$ko" "$work/cdc-acm.ko.sha256" "$work/kernel-build" "$work/kernel-package"
+chmod 0755 -- "$work"
+sync
+
+echo "received cdc-acm.ko for $KVER (all checks passed):"
+echo "  sha256   $sum   <- compare with the sha256 build-cdc-acm.sh printed"
+echo "  vermagic $magic"
+echo "  kernel   $pkgbase $kpkgver, $(uname -v)"
+confirm
+
+# The same build as the one armed now (same bytes, same kernel build)? Then a port that is taken
+# after the check above does not leave the unit disarmed.
+same=0
+if [ "$(unit_enabled)" = enabled ] && [ -f "$DIR/cdc-acm.ko.sha256" ] && [ -f "$DIR/kernel-build" ] &&
+        [ "$(cat -- "$DIR/cdc-acm.ko.sha256")" = "$(cat -- "$work/cdc-acm.ko.sha256")" ] &&
+        [ "$(cat -- "$DIR/kernel-build")" = "$(cat -- "$work/kernel-build")" ]; then
+    same=1
+fi
+# Disarmed until the new build has loaded once; checked before the swap, so a failed disable
+# leaves the build that was armed in place.
+disarm "The staged build was not replaced; run the same command again once systemctl answers"
+rm -rf -- "$DIR.old"
+if [ -e "$DIR" ] || [ -L "$DIR" ]; then
+    mv -T -- "$DIR" "$DIR.old"
+fi
+mv -T -- "$work" "$DIR"
+trap - EXIT
+rm -rf -- "$DIR.old"
+# Builds for kernels this slot no longer has can never load here (the other A/B slot keeps its own
+# copy in its own /var for a rollback); leftovers of interrupted runs go too.
+for d in "$STORE"/by-kernel/* "$STORE"/by-kernel/.stage.*; do
+    if [ "$d" = "$DIR" ]; then
+        continue
+    fi
+    k="$(basename -- "$d")"
+    if [[ "$k" == .stage.* ]]; then
+        rm -rf -- "$d"
+    elif [ ! -d "/usr/lib/modules/$k" ]; then
+        echo "removing the build for kernel $k (not installed in this slot)"
+        rm -rf -- "$d"
+    fi
+done
+sync
+
+echo "staged $DIR/cdc-acm.ko"
+load_and_arm "$same"

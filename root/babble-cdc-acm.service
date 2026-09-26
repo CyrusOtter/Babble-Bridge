@@ -1,0 +1,59 @@
+# Loads the Babble face tracker's locally built cdc-acm driver at boot (Babble-Bridge).
+# Installed by root/install-cdc-acm-loader.sh; enabled only by stage-cdc-acm, after the staged
+# module has loaded once. One load at boot is enough: a registered driver binds the tracker
+# whether it is already plugged in or plugged in later.
+#
+# The module is read only from the root-owned store /var/lib/babble-tracker/by-kernel/<uname -r>/,
+# never from /home. After a kernel change the unit is skipped (not failed) until the module is
+# rebuilt and staged again (as steamos: bash build-cdc-acm.sh --install in the Babble-Bridge copy).
+#
+# Kept across SteamOS atomic updates by the default keep list (/etc/systemd/system/*.service,
+# *.wants/**) and by /etc/atomic-update.conf.d/babble-tracker.conf.
+[Unit]
+Description=cdc-acm driver for the Babble face tracker (locally built, root-staged)
+Documentation=https://git.ott-labs.de/OTT-Labs/Babble-Bridge
+ConditionPathExists=/var/lib/babble-tracker/load-cdc-acm
+ConditionPathExists=!/sys/module/cdc_acm
+RequiresMountsFor=/var/lib/babble-tracker
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=30
+# Exit 1 = nothing to do for this kernel build (e.g. right after an OS update): the unit is
+# skipped and insmod is never tried. Exit 255 = a staged module failed a check, or an earlier
+# load never finished: the unit fails (systemctl --failed). journalctl -u babble-cdc-acm says why.
+ExecCondition=/var/lib/babble-tracker/load-cdc-acm --check
+ExecStart=/var/lib/babble-tracker/load-cdc-acm
+# Crash marker written around insmod; the only writable path.
+StateDirectory=babble-tracker/state
+StateDirectoryMode=0700
+# finit_module() needs CAP_SYS_MODULE and nothing else. /home is invisible and the rest of the
+# system read-only, so the loader can never be pointed at a user-writable file.
+# Do NOT add ProtectKernelModules=yes: it removes CAP_SYS_MODULE and makes loading impossible.
+CapabilityBoundingSet=CAP_SYS_MODULE
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+ProtectKernelTunables=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service @module
+SystemCallErrorNumber=EPERM
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

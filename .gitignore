@@ -3,3 +3,9 @@ __pycache__/
 *.log
 *.log.old
 *.lock
+# release build output (CI "Build tarball") and local virtual environments
+dist/
+*.tar.gz
+*.tar.gz.sha256
+.venv/
+venv/

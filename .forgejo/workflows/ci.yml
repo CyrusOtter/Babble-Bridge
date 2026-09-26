@@ -13,12 +13,21 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Shell syntax
-        run: bash -n build-cdc-acm.sh install-headset.sh overlay/install-overlay.sh overlay/fcam_overlay.sh
+        # One file per call: bash -n checks only its first argument (the rest are positional
+        # parameters). tests/test_cdc_acm_loader.py checks that every shell script is listed.
+        run: |
+          set -e
+          for f in build-cdc-acm.sh install-headset.sh overlay/install-overlay.sh overlay/fcam_overlay.sh \
+                   overlay/tools/gl_exit_test.sh \
+                   root/install-cdc-acm-loader.sh root/load-cdc-acm root/stage-cdc-acm; do
+            bash -n "$f"
+          done
 
       - name: Byte-compile
         run: |
           python3 --version
-          python3 -m py_compile fcam_bridge.py overlay/fcam_overlay.py overlay/openvr_min.py overlay/fcam_font.py
+          python3 -m py_compile fcam_bridge.py overlay/fcam_overlay.py overlay/openvr_min.py overlay/fcam_font.py \
+                                overlay/gl_texture.py
 
       - name: Unit tests
         run: python3 -m unittest discover -s tests -v
@@ -51,7 +60,7 @@ jobs:
           fi
           NAME="babble-bridge-${VERSION}"
           mkdir -p "dist/${NAME}"
-          cp -r fcam_bridge.py fcam-bridge.service 90-babble-tracker.rules install-headset.sh build-cdc-acm.sh \
+          cp -r fcam_bridge.py fcam-bridge.service root install-headset.sh build-cdc-acm.sh \
                 overlay README.md PROTOCOL.md "dist/${NAME}/"
           rm -rf "dist/${NAME}/overlay/__pycache__"
           tar -C dist -czf "${NAME}.tar.gz" "${NAME}"

@@ -1,7 +1,9 @@
 """
-Minimal ctypes binding to the OpenVR runtime (libopenvr_api.so) for the FCAM overlay.
+Minimal ctypes binding to the OpenVR runtime (libopenvr_api.so) for the Steam Frame overlays
+(FCAM bridge in Babble-Bridge/overlay, Steam Frame Eye in SteamFrameEyeModule/headset; keep both
+copies identical).
 
-Only the calls the overlay needs are exposed, through the C "FnTable:" interface tables.
+Only the calls the overlays need are exposed, through the C "FnTable:" interface tables.
 Function positions come from openvr_capi.h of OpenVR SDK 2.15.6 (see tools/gen_openvr_indices.py);
 the Steam Frame runtime (SteamVR build 1789606310, Sep 2026) accepts these interface versions.
 Standard library only; no pyopenvr.
@@ -27,6 +29,8 @@ VROverlayFlags_MakeOverlaysInteractiveIfVisible = 65536
 VREvent_MouseMove = 300
 VREvent_MouseButtonDown = 301
 VREvent_MouseButtonUp = 302
+VREvent_FocusEnter = 303
+VREvent_FocusLeave = 304
 VREvent_OverlayShown = 500
 VREvent_OverlayHidden = 501
 VREvent_DashboardActivated = 502
@@ -34,16 +38,36 @@ VREvent_DashboardDeactivated = 503
 VREvent_Quit = 700
 VREvent_ProcessQuit = 701
 VREvent_RestartRequested = 705
+VREvent_KeyboardClosed = 1200
+VREvent_KeyboardCharInput = 1201
+VREvent_KeyboardDone = 1202
+VREvent_KeyboardClosed_Global = 1204
+
+TextureType_OpenGL = 1
+ColorSpace_Auto = 0
+ColorSpace_Gamma = 1
+ColorSpace_Linear = 2
+KeyboardFlag_Minimal = 1 << 0
+KeyboardFlag_Modal = 1 << 1
 
 VRInitError_None = 0
 VRInitError_Init_InstallationNotFound = 100
 VRInitError_Init_NoServerForBackgroundApp = 121
 
-# Interface versions to try, newest first. The runtime keeps older versions callable and new
-# functions are appended to the tables, so an older table layout works with a newer version.
-IVRSystem_Versions = ("IVRSystem_026", "IVRSystem_025", "IVRSystem_024", "IVRSystem_023", "IVRSystem_022")
-IVROverlay_Versions = ("IVROverlay_028", "IVROverlay_029", "IVROverlay_027", "IVROverlay_026", "IVROverlay_025")
-IVRApplications_Versions = ("IVRApplications_008", "IVRApplications_007")
+# EVROverlayError codes the overlays act on (see OpenVRError.code)
+VROverlayError_None = 0
+VROverlayError_UnknownOverlay = 10
+VROverlayError_InvalidHandle = 11
+VROverlayError_RequestFailed = 23
+VROverlayError_InvalidTexture = 24
+VROverlayError_TimedOut = 34
+
+# Interface versions, pinned. The function positions below are those of exactly these versions in
+# openvr_capi.h 2.15.6. Other versions of a table have functions inserted in between (not only
+# appended), so their positions differ and a fallback to them would call the wrong functions.
+IVRSystem_Versions = ("IVRSystem_026",)
+IVROverlay_Versions = ("IVROverlay_028",)
+IVRApplications_Versions = ("IVRApplications_008",)
 
 IVRSystem_Count = 51
 IVROverlay_Count = 82
@@ -58,7 +82,12 @@ LIBRARY_CANDIDATES = (
 
 
 class OpenVRError(Exception):
-    pass
+    """A failed OpenVR call. code is the runtime's error code (EVROverlayError, EVRApplicationError or
+    EVRInitError, depending on the call), or None when there is none."""
+
+    def __init__(self, message, code=None):
+        super().__init__(message)
+        self.code = code
 
 
 class VREvent_t(ctypes.Structure):
@@ -75,9 +104,24 @@ class VREvent_t(ctypes.Structure):
         """(x, y, button) of a VREvent_Mouse_t payload."""
         return struct.unpack_from("<ffI", bytes(self.data))
 
+    def keyboard(self):
+        """(new_input, user_value, overlay_handle) of a VREvent_Keyboard_t payload
+        (char cNewInput[8]; uint64 uUserValue; uint64 overlayHandle)."""
+        new_input, user_value, overlay_handle = struct.unpack_from("<8sQQ", bytes(self.data))
+        return new_input.split(b"\0", 1)[0].decode(errors="replace"), user_value, overlay_handle
+
 
 class HmdVector2_t(ctypes.Structure):
     _fields_ = [("v", c_float * 2)]
+
+
+class Texture_t(ctypes.Structure):
+    """Texture_t: void *handle; ETextureType eType; EColorSpace eColorSpace."""
+    _fields_ = [("handle", c_void_p), ("eType", c_int), ("eColorSpace", c_int)]
+
+
+class VRTextureBounds_t(ctypes.Structure):
+    _fields_ = [("uMin", c_float), ("vMin", c_float), ("uMax", c_float), ("vMax", c_float)]
 
 
 assert ctypes.sizeof(VREvent_t) == 60
@@ -197,7 +241,6 @@ class Overlay:
         self._poll_event = table.fn(48, c_bool, c_uint64, POINTER(VREvent_t), c_uint32)
         self._set_input_method = table.fn(50, c_int, c_uint64, c_int)
         self._set_mouse_scale = table.fn(52, c_int, c_uint64, POINTER(HmdVector2_t))
-        self._clear_texture = table.fn(61, c_int, c_uint64)
         self._set_raw = table.fn(62, c_int, c_uint64, c_void_p, c_uint32, c_uint32, c_uint32)
         self._set_from_file = table.fn(63, c_int, c_uint64, c_char_p)
         self._texture_size = table.fn(66, c_int, c_uint64, POINTER(c_uint32), POINTER(c_uint32))
@@ -205,6 +248,14 @@ class Overlay:
         self._is_dashboard_visible = table.fn(68, c_bool)
         self._is_active_dashboard_overlay = table.fn(69, c_bool, c_uint64)
         self._show_dashboard = table.fn(72, None, c_char_p)
+        self._set_sort_order = table.fn(20, c_int, c_uint64, c_uint32)
+        self._set_texture_bounds = table.fn(30, c_int, c_uint64, POINTER(VRTextureBounds_t))
+        self._set_texture = table.fn(60, c_int, c_uint64, POINTER(Texture_t))
+        self._clear_texture = table.fn(61, c_int, c_uint64)
+        self._show_keyboard = table.fn(75, c_int, c_uint64, c_int, c_int, c_uint32, c_char_p, c_uint32, c_char_p,
+                                       c_uint64)
+        self._get_keyboard_text = table.fn(76, c_uint32, c_char_p, c_uint32)
+        self._hide_keyboard = table.fn(77, None)
 
     def error_name(self, code):
         value = self._error_name(code)
@@ -212,11 +263,16 @@ class Overlay:
 
     def _check(self, code, what):
         if code != 0:
-            raise OpenVRError("%s failed: %s (%d)" % (what, self.error_name(code), code))
+            raise OpenVRError("%s failed: %s (%d)" % (what, self.error_name(code), code), code)
+
+    def find_overlay_code(self, key):
+        """FindOverlay as (EVROverlayError code, handle); the handle is None unless the code is 0."""
+        handle = c_uint64(0)
+        code = int(self._find(key.encode(), byref(handle)))
+        return code, (handle.value if code == 0 else None)
 
     def find_overlay(self, key):
-        handle = c_uint64(0)
-        return handle.value if self._find(key.encode(), byref(handle)) == 0 else None
+        return self.find_overlay_code(key)[1]
 
     def create_overlay(self, key, name):
         handle = c_uint64(0)
@@ -230,7 +286,8 @@ class Overlay:
         return main.value, thumb.value
 
     def destroy_overlay(self, handle):
-        self._destroy(handle)
+        """DestroyOverlay; returns the EVROverlayError code (0 = ok) instead of raising, for teardown."""
+        return int(self._destroy(handle))
 
     def set_flag(self, handle, flag, enabled):
         self._check(self._set_flag(handle, flag, enabled), "SetOverlayFlag")
@@ -276,7 +333,13 @@ class Overlay:
         self._check(self._set_raw(handle, array, width, height, bytes_per_pixel), "SetOverlayRaw")
 
     def clear_texture(self, handle):
-        self._check(self._clear_texture(handle), "ClearOverlayTexture")
+        """ClearOverlayTexture; returns the EVROverlayError code (0 = ok) instead of raising, for teardown."""
+        return int(self._clear_texture(handle))
+
+    def set_gl_texture(self, handle, texture_id, color_space=ColorSpace_Gamma):
+        """SetOverlayTexture with an OpenGL texture of the calling thread's current EGL/GL context."""
+        texture = Texture_t(c_void_p(texture_id), TextureType_OpenGL, color_space)
+        self._check(self._set_texture(handle, byref(texture)), "SetOverlayTexture")
 
     def set_from_file(self, handle, path):
         self._check(self._set_from_file(handle, os.fsencode(path)), "SetOverlayFromFile")
@@ -295,6 +358,30 @@ class Overlay:
 
     def show_dashboard(self, key):
         self._show_dashboard(key.encode())
+
+    def set_sort_order(self, handle, order):
+        self._check(self._set_sort_order(handle, order), "SetOverlaySortOrder")
+
+    def set_texture_bounds(self, handle, u_min, v_min, u_max, v_max):
+        bounds = VRTextureBounds_t(u_min, v_min, u_max, v_max)
+        self._check(self._set_texture_bounds(handle, byref(bounds)), "SetOverlayTextureBounds")
+
+    def show_keyboard(self, handle, description, existing_text="", max_chars=128, user_value=0,
+                      flags=KeyboardFlag_Modal):
+        """Opens the SteamVR keyboard for this overlay (single line, normal input mode). Without
+        KeyboardFlag_Minimal the keyboard buffers the text in its own input line (pre-filled with
+        existing_text) and the result is read with keyboard_text() on VREvent_KeyboardDone; with
+        Minimal it sends VREvent_KeyboardCharInput per key instead and keeps no buffer."""
+        self._check(self._show_keyboard(handle, 0, 0, flags, description.encode(), max_chars,
+                                        existing_text.encode(), user_value), "ShowKeyboardForOverlay")
+
+    def keyboard_text(self):
+        buf = ctypes.create_string_buffer(512)
+        self._get_keyboard_text(buf, 512)
+        return buf.value.decode(errors="replace")
+
+    def hide_keyboard(self):
+        self._hide_keyboard()
 
 
 class Applications:
@@ -317,7 +404,7 @@ class Applications:
 
     def _check(self, code, what):
         if code != 0:
-            raise OpenVRError("%s failed: %s (%d)" % (what, self.error_name(code), code))
+            raise OpenVRError("%s failed: %s (%d)" % (what, self.error_name(code), code), code)
 
     def add_manifest(self, path, temporary=False):
         self._check(self._add_manifest(os.fsencode(os.path.abspath(path)), temporary), "AddApplicationManifest")
@@ -369,11 +456,15 @@ class Session:
         err = c_int(0)
         token = self.lib.VR_InitInternal2(byref(err), app_type, None)
         if err.value != VRInitError_None:
-            raise OpenVRError("VR_Init failed (%d) %s" % (err.value, self.error_text(err.value)))
+            raise OpenVRError("VR_Init failed (%d) %s" % (err.value, self.error_text(err.value)), err.value)
         self.token = token
-        self.system = System(self.lib)
-        self.overlay = Overlay(self.lib)
-        self.applications = Applications(self.lib)
+        try:
+            self.system = System(self.lib)
+            self.overlay = Overlay(self.lib)
+            self.applications = Applications(self.lib)
+        except BaseException:
+            self.shutdown()   # e.g. a pinned interface version the runtime does not offer
+            raise
         return self
 
     def shutdown(self):

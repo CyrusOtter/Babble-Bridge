@@ -1,0 +1,12 @@
+# Babble face tracker (Espressif USB Serial/JTAG, 303a:1001) on a Steam Frame.
+# Installed by Babble-Bridge root/install-cdc-acm-loader.sh as /etc/udev/rules.d/70-babble-tracker.rules.
+#
+# Only the tracker's tty: an ACL for the logged-in seat user (uaccess), the stable name
+# /dev/babble-tracker, and ModemManager kept off the port should it ever be installed. The driver
+# itself is loaded at boot by babble-cdc-acm.service; udev runs nothing here.
+#
+# The number matters: TAG+="uaccess" must be set before /usr/lib/udev/rules.d/73-seat-late.rules
+# applies the ACL. /etc/udev/rules.d is not on the SteamOS atomic-update keep list; this file is
+# kept by /etc/atomic-update.conf.d/babble-tracker.conf. 303a:1001 is the default ID of every
+# ESP32-S3/C3/C6 USB Serial/JTAG port, so such boards get the same treatment.
+SUBSYSTEM=="tty", KERNEL=="ttyACM[0-9]*", ATTRS{idVendor}=="303a", ATTRS{idProduct}=="1001", ENV{ID_MM_DEVICE_IGNORE}="1", TAG+="uaccess", SYMLINK+="babble-tracker"

@@ -57,7 +57,7 @@ JPEG_EOI = b"\xff\xd9"
 # Espressif USB JTAG/serial debug unit: the ESP32-S3 in the Babble tracker
 DEFAULT_USB_ID = "303a:1001"
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 log = logging.getLogger("fcam")
 
@@ -464,7 +464,8 @@ class Bridge:
         self.stop = stop_event
         self.chunk = args.chunk
         self.sub_ttl = args.sub_ttl
-        self.subs = {}  # (host, port) -> expiry (monotonic seconds)
+        self.subs = {}  # (host, port) -> expiry (monotonic seconds); changed by the bridge thread only
+        self._subs_lock = threading.Lock()  # guards changes to subs against snapshot() from other threads
         self.targets = [parse_hostport(t) for t in args.target]
         self.seq = 0
         self.sent_frames = 0
@@ -491,8 +492,21 @@ class Bridge:
     def _expire_subscribers(self, now):
         for addr, expiry in list(self.subs.items()):
             if expiry < now:
-                del self.subs[addr]
+                with self._subs_lock:
+                    del self.subs[addr]
                 log.info("subscriber %s:%d timed out", addr[0], addr[1])
+
+    def _subscribe(self, key, name):
+        if key not in self.subs:
+            log.info("subscriber %s:%d joined (%s)", key[0], key[1], name)
+        with self._subs_lock:
+            self.subs[key] = time.monotonic() + self.sub_ttl
+
+    def _unsubscribe(self, key):
+        with self._subs_lock:
+            removed = self.subs.pop(key, None) is not None
+        if removed:
+            log.info("subscriber %s:%d left", key[0], key[1])
 
     def _recv_control(self):
         while True:
@@ -509,13 +523,9 @@ class Bridge:
             msg_type = fields[0]
             key = addr[:2]
             if msg_type == TYPE_SUBSCRIBE:
-                if key not in self.subs:
-                    name = data[HEADER_LEN:].decode("utf-8", "replace") or "unnamed"
-                    log.info("subscriber %s:%d joined (%s)", key[0], key[1], name)
-                self.subs[key] = time.monotonic() + self.sub_ttl
+                self._subscribe(key, data[HEADER_LEN:].decode("utf-8", "replace") or "unnamed")
             elif msg_type == TYPE_UNSUBSCRIBE:
-                if self.subs.pop(key, None) is not None:
-                    log.info("subscriber %s:%d left", key[0], key[1])
+                self._unsubscribe(key)
 
     # -- sending
 
@@ -570,7 +580,10 @@ class Bridge:
             self._fps_window_start = now
 
     def snapshot(self):
-        """Current state for status displays. Safe to call from another thread."""
+        """Current state for status displays. Safe to call from another thread: the containers the
+        bridge thread changes are copied under the lock, never iterated while they may change."""
+        with self._subs_lock:
+            subscribers = list(self.subs)
         return {
             "state": self.source.state,
             "source": self.source.description,
@@ -580,8 +593,8 @@ class Bridge:
             "dropped": self.frames.dropped,
             "unsent": self.unsent_frames,
             "send_errors": self.send_errors,
-            "subscribers": ["%s:%d" % a for a in self.subs],
-            "targets": ["%s:%d" % t for t in self.targets],
+            "subscribers": ["%s:%d" % a for a in subscribers],
+            "targets": ["%s:%d" % t for t in tuple(self.targets)],
             "listen_host": self.listen_addr[0],
             "listen_port": self.listen_addr[1],
             "uptime": int(time.monotonic() - self.started),

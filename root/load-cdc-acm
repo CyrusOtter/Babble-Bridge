@@ -1,0 +1,153 @@
+#!/bin/bash
+# /var/lib/babble-tracker/load-cdc-acm  (root:root 0755)
+# Installed by Babble-Bridge root/install-cdc-acm-loader.sh. Run only by babble-cdc-acm.service:
+# ExecCondition=load-cdc-acm --check, then ExecStart=load-cdc-acm.
+#
+# Loads the cdc-acm.ko that stage-cdc-acm put into /var/lib/babble-tracker/by-kernel/<uname -r>/.
+# Takes no input besides --check: no configuration, no environment, nothing under /home (the unit
+# hides /home altogether). Loads only if every directory and file on the way is root-owned, not a
+# symlink and not writable by group or others, the files have one link each, the sha256 matches,
+# the module was staged on exactly the running kernel build (uname -v), its vermagic equals that of
+# the kernel's own modules, it is cdc_acm and it has no dependencies.
+#
+#   --check  exit 0    a staged module passes every check: go ahead
+#            exit 1    nothing to do (unit skipped): cdc_acm is loaded, or nothing is staged for
+#                      this kernel build (after an OS update: rebuild and stage again)
+#            exit 255  refused (unit failed): a staged module fails a check, an earlier load
+#                      attempt never finished, or cdc_acm is stuck half loaded
+#   (none)   the same checks, then insmod: exit 0 loaded or nothing to do, 255 refused or failed
+#
+# "Loaded" means /sys/module/cdc_acm/initstate is "live". The kernel creates /sys/module/cdc_acm
+# before it runs the module's init, so a module whose init crashed (an oops, e.g. from an ABI
+# mismatch: this kernel has no MODVERSIONS) leaves the directory behind in state "coming".
+set -uo pipefail
+export PATH=/usr/bin LC_ALL=C
+umask 077
+
+STORE=/var/lib/babble-tracker
+MARK="$STORE/state/load-attempt"     # in the unit's StateDirectory; written before insmod, removed
+                                     # once insmod returned (a crash inside insmod keeps it)
+HINT="as steamos: bash <your Babble-Bridge copy>/build-cdc-acm.sh --install"
+
+CHECK=0
+case "${1:-}" in
+    --check) CHECK=1 ;;
+    "") ;;
+    *) echo "usage: $0 [--check]" >&2; exit 255 ;;
+esac
+
+skip() {
+    echo "$*"
+    if [ "$CHECK" = 1 ]; then exit 1; fi
+    exit 0
+}
+refuse() {
+    echo "refusing to load cdc-acm.ko: $*" >&2
+    exit 255
+}
+# absent, live, builtin (part of the kernel: no initstate), or coming/going: a load or unload that
+# never finished.
+module_state() {
+    local state
+    if [ ! -d /sys/module/cdc_acm ]; then
+        echo absent
+        return
+    fi
+    state="$(cat /sys/module/cdc_acm/initstate 2>/dev/null)" || state=builtin
+    echo "${state:-unknown}"
+}
+
+state="$(module_state)"
+case "$state" in
+    absent) ;;
+    live|builtin) skip "cdc_acm is already loaded" ;;
+    *) refuse "cdc_acm is stuck in state '$state': an earlier load never finished (did the module crash in its init? journalctl -k -b). Reboot, then rebuild ($HINT)" ;;
+esac
+KVER="$(uname -r)"
+[[ "$KVER" =~ ^[A-Za-z0-9._+-]+$ ]] || refuse "unexpected kernel release '$KVER'"
+DIR="$STORE/by-kernel/$KVER"
+KO="$DIR/cdc-acm.ko"
+if [ ! -e "$DIR" ] && [ ! -L "$DIR" ]; then
+    skip "no cdc-acm.ko staged for kernel $KVER ($HINT)"
+fi
+if [ -e "$MARK" ]; then
+    refuse "an earlier load attempt never finished (started $(head -c 120 -- "$MARK")); the kernel may have crashed while loading it. See the kernel log of that boot (journalctl -k -b -1, or -b for this boot), then rebuild ($HINT) or re-arm: sudo $STORE/stage-cdc-acm --rearm"
+fi
+
+# stat without -L describes the entry itself: a symlink shows up as "symbolic link".
+check() {  # PATH "directory"|"regular file"
+    local st uid mode links type
+    st="$(stat -c '%u %a %h %F' -- "$1" 2>/dev/null)" || refuse "$1 is missing"
+    read -r uid mode links type <<<"$st"
+    [ "$type" = "$2" ] || refuse "$1 is a $type, expected a $2"
+    [ "$uid" = 0 ] || refuse "$1 is owned by uid $uid, not root"
+    (( (8#$mode & 8#022) == 0 )) || refuse "$1 is writable by group or others (mode $mode)"
+    if [ "$2" = "regular file" ] && [ "$links" != 1 ]; then
+        refuse "$1 has $links hard links"
+    fi
+}
+for d in / /var /var/lib "$STORE" "$STORE/by-kernel" "$DIR"; do
+    check "$d" directory
+done
+for f in "$KO" "$DIR/cdc-acm.ko.sha256" "$DIR/kernel-build"; do
+    check "$f" "regular file"
+done
+
+# Exactly the kernel build it was staged on: a rebuild with the same uname -r (new pkgrel) keeps
+# the vermagic but may change the ABI (no MODVERSIONS on this kernel).
+staged_build="$(cat -- "$DIR/kernel-build")"
+running_build="$(uname -v)"
+if [ "$staged_build" != "$running_build" ]; then
+    skip "cdc-acm.ko was staged on another build of $KVER ('$staged_build', running '$running_build'); rebuild and stage again ($HINT)"
+fi
+
+want_sum="$(cut -d' ' -f1 "$DIR/cdc-acm.ko.sha256")"
+have_sum="$(sha256sum -- "$KO" | cut -d' ' -f1)"
+if ! [[ "$want_sum" =~ ^[0-9a-f]{64}$ ]] || [ "$have_sum" != "$want_sum" ]; then
+    refuse "$KO does not match its recorded sha256 (damaged copy?); stage it again ($HINT)"
+fi
+
+# vermagic identical to the kernel's own modules (the whole string the kernel compares).
+ref="$(find "/usr/lib/modules/$KVER/kernel" -type f -name '*.ko*' -print -quit 2>/dev/null)"
+[ -n "$ref" ] || refuse "no in-tree module under /usr/lib/modules/$KVER/kernel to compare the vermagic with"
+want_magic="$(modinfo -F vermagic "$ref" 2>/dev/null)"
+[ -n "$want_magic" ] || refuse "cannot read the vermagic of $ref"
+have_magic="$(modinfo -F vermagic "$KO" 2>/dev/null)"
+name="$(modinfo -F name "$KO" 2>/dev/null)"
+deps="$(modinfo -F depends "$KO" 2>/dev/null)"
+[ "$have_magic" = "$want_magic" ] || refuse "vermagic '$have_magic' differs from the kernel's own modules ('$want_magic')"
+[ "${have_magic%% *}" = "$KVER" ] || refuse "vermagic '$have_magic' is not for kernel $KVER"
+[ "$name" = cdc_acm ] || refuse "$KO is module '$name', not cdc_acm"
+[ -z "$deps" ] || refuse "$KO depends on '$deps'"
+
+if [ "$CHECK" = 1 ]; then
+    echo "$KO: staged for $KVER ($running_build), all checks passed"
+    exit 0
+fi
+
+# Crash marker: if the kernel dies inside insmod, or insmod is killed because the module's init
+# oopsed, the marker stays and every later boot refuses (unit failed) instead of crashing again.
+# stage-cdc-acm removes it.
+printf 'boot %s at %s\n' "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" "$(date -u '+%F %T UTC')" > "$MARK" ||
+    refuse "cannot write $MARK"
+sync -- "$MARK" "$STORE/state" 2>/dev/null || sync
+echo "loading $KO (sha256 $have_sum, vermagic $have_magic)"
+insmod "$KO"
+rc=$?
+if [ "$rc" -ge 128 ]; then
+    # Killed by a signal: the kernel oopsed while loading (most likely in the module's init) and
+    # killed insmod. cdc_acm is left half loaded ("coming"); the marker stays.
+    refuse "insmod was killed by signal $((rc - 128)): the module crashed while loading (journalctl -k -b). cdc_acm is $(module_state); the crash marker stays, so it is not loaded again. Reboot, then rebuild ($HINT)"
+fi
+rm -f -- "$MARK"
+sync -- "$STORE/state" 2>/dev/null || sync
+state="$(module_state)"
+if [ "$state" = live ]; then
+    if [ "$rc" = 0 ]; then
+        echo "cdc_acm loaded"
+    else
+        echo "cdc_acm was loaded concurrently (exit status of insmod: $rc)"
+    fi
+    exit 0
+fi
+refuse "insmod exited with $rc and cdc_acm is $state, not live (journalctl -k -b)"
