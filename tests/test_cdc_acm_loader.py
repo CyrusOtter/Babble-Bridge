@@ -473,8 +473,10 @@ class RootScriptTests(unittest.TestCase):
                     "overlay/install-overlay.sh"):
             for line in code_lines(read_text(os.path.join(ROOT, rel))):
                 self.assertNotIn("~/Babble-Bridge", line, rel)
+        # The README itself installs into one place, ~/Babble-Bridge, and uses it throughout.
         readme = read_text(os.path.join(ROOT, "README.md"))
-        self.assertIn("bash ~/babble-bridge-X.Y.Z/build-cdc-acm.sh --install'   # release tarball", readme)
+        self.assertIn("bash ~/Babble-Bridge/build-cdc-acm.sh --install'", readme)
+        self.assertNotIn("~/babble-bridge-", readme)
 
 
 class RepositoryHygieneTests(unittest.TestCase):

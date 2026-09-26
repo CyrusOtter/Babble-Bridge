@@ -42,7 +42,7 @@ FCAM overlay installed in $dest.
   start:   python3 $dest/fcam_overlay.py --start   (after stopping it; with the options installed here)
   log:     $dest/fcam_overlay.log
   remove:  python3 $dest/fcam_overlay.py --uninstall
-  Babble face camera address: fcam://${ip:-<headset-ip>}:8555
+  Baballonia face camera address: fcam://${ip:-<headset-ip>}:8555
   texture mode: ${mode:-unknown} (change: bash $here/install-overlay.sh --texture-mode auto|gl|file)
   texture path in use: grep -E 'GL texture path|panel texture' $dest/fcam_overlay.log | tail -3
 MSG

@@ -1,29 +1,28 @@
 # Babble Bridge for the Steam Frame
 
-Use a Babble face tracker that is plugged into a **Steam Frame** with Babble
-([OTT-Labs/Babble](https://git.ott-labs.de/OTT-Labs/Babble), our fork of Baballonia)
-running on your PC.
+Use a Babble face tracker that is plugged into a **Steam Frame** with
+[Baballonia](https://github.com/Project-Babble/Baballonia), the Babble app, running on your PC.
 
 ```
-Babble tracker ──USB-C (CDC-ACM)──> Steam Frame ──Wi-Fi (FCAM/UDP)──> PC: Babble
+Babble tracker ──USB-C (CDC-ACM)──> Steam Frame ──Wi-Fi (FCAM/UDP)──> PC: Baballonia
                                     fcam_bridge.py                    fcam://<headset-ip>:8555
 ```
 
 The Frame's rear USB-C port powers the tracker and enumerates it, but the stock
-kernel has no serial class driver and Babble does not run on the headset. The
+kernel has no serial class driver and Baballonia does not run on the headset. The
 bridge reads the tracker's JPEG stream from `/dev/ttyACM0` and sends it to the
 PC over UDP with the small FCAM protocol described in [PROTOCOL.md](PROTOCOL.md).
-On the PC, Babble's `FcamStreamCapture` module receives it like any other camera.
+On the PC, Baballonia's **FCAM UDP Stream** capture receives it like any other camera.
 
 It runs as a **SteamVR overlay application** on the headset: SteamVR starts it at
 boot, and a **FCAM Bridge** tab in the dashboard shows the tracker state, frame
-rate, connected clients, the address to enter in Babble and a "Restart bridge"
+rate, connected clients, the address to enter in Baballonia and a "Restart bridge"
 button. Everything is Python standard library only; nothing has to be installed
 on the headset.
 
 ![The FCAM Bridge tab in the SteamVR dashboard](docs/overlay-panel.png)
 
-*The FCAM Bridge tab with a tracker streaming to one Babble client (default file texture
+*The FCAM Bridge tab with a tracker streaming to one Baballonia client (default file texture
 mode). Rendered with the overlay's own drawing code by `overlay/tools/render_screenshot.py`;
 on the headset it is a 1.5 m wide panel in the SteamVR dashboard.*
 
@@ -39,23 +38,25 @@ on the headset it is a 1.5 m wide panel in the SteamVR dashboard.*
 
 ## Install (SteamVR overlay)
 
-From a release tarball, on the headset:
+On the headset, fetch the current `main` from GitHub into `~/Babble-Bridge` and
+install the overlay:
 
 ```sh
-VERSION=0.2.0
-curl -fsSL https://s3.ott-labs.de/ott-labs/babble-bridge/${VERSION}/babble-bridge-${VERSION}.tar.gz | tar xz
-bash babble-bridge-${VERSION}/overlay/install-overlay.sh
+mkdir -p ~/Babble-Bridge && curl -fsSL https://github.com/CyrusOtter/Babble-Bridge/archive/refs/heads/main.tar.gz | tar xz --strip-components=1 -C ~/Babble-Bridge
+bash ~/Babble-Bridge/overlay/install-overlay.sh
 ```
 
-Or from a checkout, from the PC:
+Or clone it there with git (`git clone https://github.com/CyrusOtter/Babble-Bridge.git ~/Babble-Bridge`),
+or copy a checkout from the PC:
 
 ```sh
 scp -r Babble-Bridge steamos@<headset-ip>:~/
 ssh steamos@<headset-ip> 'bash ~/Babble-Bridge/overlay/install-overlay.sh'
 ```
 
-The commands in this README use `~/Babble-Bridge`, the checkout. With the
-release tarball, your copy is `~/babble-bridge-X.Y.Z` instead: use that path.
+Every command in this README uses that copy, `~/Babble-Bridge`. To update, fetch
+it again the same way (or `git -C ~/Babble-Bridge pull`) and run
+`install-overlay.sh` again.
 
 `install-overlay.sh` copies the files to `~/fcam`, registers `fcam.vrmanifest`
 in SteamVR's `~/.config/openvr/config/appconfig.json`, enables auto-launch and
@@ -106,8 +107,7 @@ disable`, nothing under `/usr` or `/lib/modules`. Run it in a terminal so sudo
 can ask for the password (once):
 
 ```sh
-ssh -t steamos@<headset-ip> 'bash ~/Babble-Bridge/build-cdc-acm.sh --install'         # checkout
-ssh -t steamos@<headset-ip> 'bash ~/babble-bridge-X.Y.Z/build-cdc-acm.sh --install'   # release tarball
+ssh -t steamos@<headset-ip> 'bash ~/Babble-Bridge/build-cdc-acm.sh --install'
 ```
 
 The first `--install` also installs the loader from `root/` (before the
@@ -231,7 +231,7 @@ and a reboot finishes the job. It stops such an instance only when SteamVR is
 certainly down (no SteamVR server answers and no `vrserver` or `vrcompositor`
 process exists); any other SteamVR error counts as "may be running".
 
-You should see `opened /dev/ttyACM0` and, once Babble connects,
+You should see `opened /dev/ttyACM0` and, once Baballonia connects,
 `subscriber <pc-ip>:<port> joined (Baballonia)`. On the headset, the dashboard
 gets a **FCAM Bridge** tab.
 
@@ -241,7 +241,7 @@ gets a **FCAM Bridge** tab.
 (`fcam-bridge.service`, logs in `journalctl --user -u fcam-bridge`). Use one or
 the other; both bind UDP 8555.
 
-## Use in Babble
+## Use in Baballonia
 
 1. Home page, **Face Camera Address**: `fcam://<headset-ip>:8555` (the address the
    FCAM Bridge tab shows). In the drop-down labelled **This is a...** below it, make
@@ -249,8 +249,8 @@ the other; both bind UDP 8555.
    too, and "Default" picks whichever loads first. Then press **Start Camera**.
 2. Crop and calibrate as with a USB tracker.
 
-No firewall rule is needed on the PC: Babble sends a subscribe datagram first,
-so the frames arrive as replies. Only listen-only mode (`fcam://:8555` in Babble
+No firewall rule is needed on the PC: Baballonia sends a subscribe datagram first,
+so the frames arrive as replies. Only listen-only mode (`fcam://:8555` in Baballonia
 plus `--target <pc-ip>` on the bridge) needs an inbound UDP rule.
 
 ## Texture modes
@@ -520,11 +520,16 @@ set-texture times (p50/max), failures and the texture path in use.
 
 ## Releases
 
-CI (`.forgejo/workflows/ci.yml`) runs the tests on every push. Tagging `vX.Y.Z`
-(after setting `__version__` in `fcam_bridge.py` to match) builds
-`babble-bridge-X.Y.Z.tar.gz`, attaches it to a Forgejo release and uploads it
-to `https://s3.ott-labs.de/ott-labs/babble-bridge/X.Y.Z/` for the headset to
-fetch without credentials.
+A release is a git tag `vX.Y.Z`, with `__version__` in `fcam_bridge.py` set to
+match. GitHub offers every tag as a tarball; to install a tagged version instead
+of `main`, into the same `~/Babble-Bridge`:
+
+```sh
+mkdir -p ~/Babble-Bridge && curl -fsSL https://github.com/CyrusOtter/Babble-Bridge/archive/refs/tags/vX.Y.Z.tar.gz | tar xz --strip-components=1 -C ~/Babble-Bridge
+```
+
+The Forgejo CI workflow (`.forgejo/workflows/ci.yml`) runs the tests on every
+push and builds the release tarballs on the Forgejo mirror.
 
 ## Troubleshooting
 
@@ -536,7 +541,7 @@ fetch without credentials.
 | Staging says `cdc_acm is in use` | The FCAM bridge holds the tracker port, so the driver cannot be unloaded to test the build. The staged build and the unit were left as they were (on the first `--install` the loader files were installed already; the installer says so). Unplug the tracker, or stop the overlay with `python3 ~/fcam/fcam_overlay.py --stop` (it refuses an instance that may use raw mode: then unplug the tracker), and run it again; afterwards `python3 ~/fcam/fcam_overlay.py --start` starts the overlay again with its installed options. |
 | The loader installer says `not verified yet` | The boot path changed, and the new files could not load the module yet (the staging was declined, or the port was taken meanwhile). The unit stays disarmed, so the next boot does not load the driver: run the command it prints (`sudo /var/lib/babble-tracker/stage-cdc-acm --rearm`, or `build-cdc-acm.sh --install` when the staged module belongs to another build of the kernel). |
 | The loader installer or staging says `cannot confirm that babble-cdc-acm.service is disarmed` | `systemctl` did not answer (or the disable did not take effect). Nothing was replaced, but the unit may or may not be armed now: check `systemctl is-enabled babble-cdc-acm.service` and run the same command again. |
-| Babble stays on "connecting", no `subscriber ... joined` in the log | PC and headset are not on the same network, or the address is wrong. |
+| Baballonia stays on "connecting", no `subscriber ... joined` in the log | PC and headset are not on the same network, or the address is wrong. |
 | Subscriber joins, no frames, status says `no-source` | The tracker is not streaming over USB. Stock Babble/OpenIris firmware streams serial only when it is not in Wi-Fi streaming mode. |
 | `... closed, waiting for it to come back` repeatedly | The tracker is re-enumerating on USB (power, hub or cable). The bridge finds it again by USB id, whichever `ttyACMn` it gets. |
 | `overlay upload failed ... RequestFailed` once | SteamVR's compositor is in standby (headset off). Uploads resume when it wakes (`overlay uploads work again`). |

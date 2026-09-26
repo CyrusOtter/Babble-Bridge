@@ -11,7 +11,7 @@
 # *.wants/**) and by /etc/atomic-update.conf.d/babble-tracker.conf.
 [Unit]
 Description=cdc-acm driver for the Babble face tracker (locally built, root-staged)
-Documentation=https://git.ott-labs.de/OTT-Labs/Babble-Bridge
+Documentation=https://github.com/CyrusOtter/Babble-Bridge
 ConditionPathExists=/var/lib/babble-tracker/load-cdc-acm
 ConditionPathExists=!/sys/module/cdc_acm
 RequiresMountsFor=/var/lib/babble-tracker

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 fcam_bridge.py - forward a serial Babble / OpenIris face tracker to Baballonia
-over the network with the FCAM/UDP protocol (see PROTOCOL.md; Babble side: OTT-Labs/Babble).
+over the network with the FCAM/UDP protocol (see PROTOCOL.md; receiving side: Baballonia's
+FCAM UDP Stream capture, https://github.com/Project-Babble/Baballonia).
 
     tracker --USB CDC-ACM--> /dev/ttyACM0 --this bridge--> UDP --> Baballonia
                                                                  (fcam://<host>:8555)

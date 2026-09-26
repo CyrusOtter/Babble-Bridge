@@ -3,7 +3,7 @@
 FCAM is a small datagram protocol that carries JPEG frames from a face tracker
 that is physically attached to one machine (for example a Babble tracker on the
 Steam Frame's USB-C port, visible there as `/dev/ttyACM0`) to Baballonia running
-on another machine (Babble, our Baballonia fork). It was designed for the Steam Frame, where the stock kernel
+on another machine. It was designed for the Steam Frame, where the stock kernel
 has no USB video or serial class drivers and the only reliable link to the PC is
 Wi-Fi.
 
@@ -42,7 +42,7 @@ Every datagram, in both directions, starts with this header.
 | 24     | 4    | `timestamp_ms` | Sender monotonic clock in milliseconds, wraps at 2^32 |
 
 Python `struct` format: `>4sBBBBHHHHIII`. C#: see `FcamHeader` in
-`src/Baballonia.FcamStreamCapture/FcamProtocol.cs` of [OTT-Labs/Babble](https://git.ott-labs.de/OTT-Labs/Babble).
+`src/Baballonia.FcamStreamCapture/FcamProtocol.cs` of [Baballonia](https://github.com/Project-Babble/Baballonia).
 
 A receiver ignores any datagram whose magic or version does not match, whose
 `payload_len` does not equal the number of bytes after the header, or whose
