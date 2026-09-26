@@ -299,9 +299,6 @@ class ModuleLoadPathTests(unittest.TestCase):
         self.assertRegex(check, r"if old_rule_present; then\n[^\n]*\n\s*rc=1")   # --check fails
         # --install goes through the installer (which removes the rule) while the rule is there
         self.assertIn('if [ -x "$STORE/stage-cdc-acm" ] && ! old_rule_present; then', build)
-        readme = read_text(os.path.join(ROOT, "README.md"))
-        upgrade = readme[readme.index("- **Upgrading from 0.1.x"):]
-        self.assertIn(OLD_RULE, upgrade[:upgrade.index("\n- ")])
 
 
 class RootScriptTests(unittest.TestCase):

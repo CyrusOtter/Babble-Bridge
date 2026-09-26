@@ -373,9 +373,9 @@ class ResolveSinkTests(unittest.TestCase):
 
 
 class ArgumentTests(unittest.TestCase):
-    def test_default_is_file_mode_in_phase_one(self):
+    def test_default_is_auto_mode(self):
         args = fcam_overlay.build_parser().parse_args([])
-        self.assertEqual("file", args.texture_mode)
+        self.assertEqual("auto", args.texture_mode)
         self.assertFalse(args.unsafe_raw)
         self.assertEqual(("auto", "gl", "file", "none", "raw"), fcam_overlay.TEXTURE_MODES)
 
@@ -389,11 +389,13 @@ class ArgumentTests(unittest.TestCase):
 
     def test_run_arguments_keep_only_run_options(self):
         parser = fcam_overlay.build_parser()
-        args = parser.parse_args(["--install", "--no-launch", "--texture-mode", "auto", "--target", "10.0.0.2",
+        args = parser.parse_args(["--install", "--no-launch", "--texture-mode", "file", "--target", "10.0.0.2",
                                   "--target", "10.0.0.3:9000", "-v", "--listen", "0.0.0.0:8555"])
-        self.assertEqual(["--target", "10.0.0.2", "--target", "10.0.0.3:9000", "--verbose", "--texture-mode", "auto"],
+        self.assertEqual(["--target", "10.0.0.2", "--target", "10.0.0.3:9000", "--verbose", "--texture-mode", "file"],
                          fcam_overlay.run_arguments(parser, args))
         self.assertEqual([], fcam_overlay.run_arguments(parser, parser.parse_args(["--install"])))
+        self.assertEqual([], fcam_overlay.run_arguments(parser, parser.parse_args(["--install", "--texture-mode",
+                                                                                   "auto"])))
         self.assertEqual([], fcam_overlay.run_arguments(parser, parser.parse_args(["--start"])))
 
     def test_start_takes_no_run_options(self):
@@ -432,14 +434,15 @@ class ArgumentTests(unittest.TestCase):
                     mock.patch.object(fcam_overlay, "config_dir", lambda: tmp), \
                     mock.patch.object(fcam_overlay, "register_live", fake_register_live), \
                     contextlib.redirect_stdout(io.StringIO()) as out:
-                self.assertEqual(0, fcam_overlay.main(["--install", "--texture-mode", "auto"]))
-                self.assertEqual("--texture-mode auto", fcam_overlay.manifest_arguments(manifest))
-                self.assertEqual((True, True, ["--texture-mode", "auto"]), recorded[-1])
-                self.assertIn("texture mode: auto", out.getvalue())
+                self.assertEqual(0, fcam_overlay.main(["--install", "--texture-mode", "file"]))
+                self.assertEqual("--texture-mode file", fcam_overlay.manifest_arguments(manifest))
+                self.assertEqual((True, True, ["--texture-mode", "file"]), recorded[-1])
+                self.assertIn("texture mode: file", out.getvalue())
                 # installing again without options goes back to the defaults
                 self.assertEqual(0, fcam_overlay.main(["--install", "--no-launch"]))
                 self.assertEqual("", fcam_overlay.manifest_arguments(manifest))
                 self.assertEqual((True, False, []), recorded[-1])
+                self.assertIn("texture mode: auto (manifest arguments: none)", out.getvalue())
             with open(manifest, "rb") as fh:
                 self.assertEqual(original, fh.read())
             self.assertFalse(os.path.exists(manifest + ".tmp"))

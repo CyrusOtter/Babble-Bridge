@@ -22,9 +22,10 @@ on the headset.
 
 ![The FCAM Bridge tab in the SteamVR dashboard](docs/overlay-panel.png)
 
-*The FCAM Bridge tab with a tracker streaming to one Baballonia client (default file texture
-mode). Rendered with the overlay's own drawing code by `overlay/tools/render_screenshot.py`;
-on the headset it is a 1.5 m wide panel in the SteamVR dashboard.*
+*The FCAM Bridge tab with a tracker streaming to one Baballonia client (default texture mode,
+GL path in use: `GL` in the footer). Rendered with the overlay's own drawing code by
+`overlay/tools/render_screenshot.py`; on the headset it is a 1.5 m wide panel in the SteamVR
+dashboard.*
 
 ## What you need on the headset
 
@@ -66,36 +67,22 @@ attaches to SteamVR as soon as it comes up). No root is needed for this part.
 Options given to `install-overlay.sh` are overlay options: they are written
 into the manifest's `arguments`, which SteamVR launches the overlay with, and a
 running instance is restarted with them. The installer prints the texture mode
-that is now registered. For example, to switch to the GL texture path once
-[the on-headset test](#testing-the-gl-texture-path-on-the-headset) has passed:
+that is now registered. The default is `auto`: the GL texture path, with file
+mode as the fallback when GL cannot be used (see [Texture modes](#texture-modes)).
+For example, to switch to file mode, and back:
 
 ```sh
-bash ~/Babble-Bridge/overlay/install-overlay.sh --texture-mode auto   # GL, file mode if GL fails
-bash ~/Babble-Bridge/overlay/install-overlay.sh                       # back to the defaults (file)
+bash ~/Babble-Bridge/overlay/install-overlay.sh --texture-mode file   # PNG files that SteamVR loads itself
+bash ~/Babble-Bridge/overlay/install-overlay.sh                       # back to the defaults (auto: GL, file if GL fails)
 ```
 
 An instance that may run in raw mode is not stopped by the installer, because
 stopping it crashes the compositor; it prints `restart required: reboot the
 headset` instead. That is an instance started with `--texture-mode raw`, and
-any 0.1.x instance that shows no sign of file mode: the first 0.1.0 builds
-always used `SetOverlayRaw`.
+any instance whose texture mode cannot be told.
 
 If `/dev/ttyACM0` does not show up when the tracker is plugged in, build and
 load the driver (see the next section).
-
-**Coming from 0.1.x?** Its instructions installed
-`/etc/udev/rules.d/90-babble-tracker.rules`, which has root load
-`~/cdc-acm/cdc-acm.ko` whenever the tracker is plugged in, a file any program
-running as `steamos` can replace. Remove it even if the port works:
-`install-overlay.sh`, `install-headset.sh` and `build-cdc-acm.sh` warn while
-it is there (and `build-cdc-acm.sh --check` fails). Either set up the new
-loader, which removes it (`build-cdc-acm.sh --install`, or
-`sudo /usr/bin/bash ~/Babble-Bridge/root/install-cdc-acm-loader.sh`), or only
-remove it:
-
-```sh
-sudo rm /etc/udev/rules.d/90-babble-tracker.rules && sudo udevadm control --reload
-```
 
 ## Building cdc-acm.ko
 
@@ -182,13 +169,13 @@ sudo /usr/bin/bash ~/Babble-Bridge/root/install-cdc-acm-loader.sh --uninstall   
 Staging and `--rearm` unload `cdc_acm` to test the build through the unit. While
 the FCAM bridge holds the tracker port that is impossible, so they stop before
 they stage or arm anything, and the build that is armed stays armed (on the
-first `--install`, or while the 0.1.x rule is still installed, the loader files
-are installed before that; the installer says so). Unplug the tracker, or stop
+first `--install` the loader files are installed before that; the installer
+says so). Unplug the tracker, or stop
 the overlay with `python3 ~/fcam/fcam_overlay.py --stop`, then run the command
 again. `--stop` waits until the overlay has exited, and it refuses an instance
-that may use raw mode (`--status` shows its texture mode as `raw` or `unknown`,
-for example an old 0.1.x instance): stopping that one would crash the
-compositor, so unplug the tracker instead. Afterwards start the overlay again
+that may use raw mode (`--status` shows its texture mode as `raw` or
+`unknown`): stopping that one would crash the compositor, so unplug the
+tracker instead. Afterwards start the overlay again
 with the options it was installed with: `python3 ~/fcam/fcam_overlay.py
 --start` (SteamVR itself only starts it when SteamVR starts).
 
@@ -260,9 +247,9 @@ ways (`--texture-mode`):
 
 | Mode | How | When GL fails | Status |
 |---|---|---|---|
-| `file` (default) | PNG in `$XDG_RUNTIME_DIR`, `SetOverlayFromFile`; SteamVR loads it itself | – | Safe on exit (verified). The tab may blink when it reloads. |
-| `gl` | One persistent GLES texture (`gl_texture.py`, EGL surfaceless), `SetOverlayTexture` on every update | ERROR in the log, blank tab (`none (GL failed)`), so a failed test is obvious | Pending the on-headset test |
-| `auto` | `gl`, falling back to `file` | ERROR in the log, then file mode for the rest of the process (`file (GL failed)`) | Becomes the default after the test passes |
+| `auto` (default) | `gl`, falling back to `file` | ERROR in the log, then file mode for the rest of the process (`file (GL failed)`) | The default. Exit safety of the GL path not systematically tested (see "Known issues"). |
+| `gl` | One persistent GLES texture (`gl_texture.py`, EGL surfaceless), `SetOverlayTexture` on every update | ERROR in the log, blank tab (`none (GL failed)`), so a failure is obvious | Strict, for testing the GL path on its own (`gl_exit_test.sh`) |
+| `file` | PNG in `$XDG_RUNTIME_DIR`, `SetOverlayFromFile`; SteamVR loads it itself | – | Safe on exit (verified). The tab may blink when it reloads. Use it if vrcompositor ever crashes when the overlay exits. |
 | `none` | No texture at all (diagnostics) | – | – |
 | `raw` | `SetOverlayRaw`; only together with `--unsafe-raw` | – | Crashes vrcompositor on exit (see below). Never chosen automatically. |
 
@@ -302,6 +289,27 @@ or `GL texture path unavailable (...)` when the texture path is chosen, and
   versions is logged as an ERROR (`SteamVR runtime not usable`), not as
   SteamVR still starting.
 
+### Performance
+
+Measured on the Steam Frame (SM8650, 8 cores; Python 3.12; Mesa zink on Turnip,
+Adreno 750, GLES 3.2) on 2026-09-26, with the overlay's own code and without
+SteamVR in the loop:
+
+| What | Measured |
+|---|---|
+| Drawing the panel (`draw_panel`, full 640x400) | median 1.36 ms, p95 2.56 ms |
+| GL upload (row flip, `glTexSubImage2D`, `glFlush`) | median 0.26 ms, p95 0.89 ms; with `glFinish` median 0.31 ms |
+| File mode, for comparison: PNG encode per update | median 2.74 ms, plus SteamVR loading the file again (not measured) |
+| GL context setup, once per process | 20 ms, +28 MB RSS (about 51 MB for the whole process) |
+| Draw + GL upload at 4 Hz (the redraw rate while the tab is open) | 1.6 % of one core |
+| Draw + GL upload at 25 Hz (worst case: continuous hover) | 9.7 % of one core |
+| Tab hidden | no uploads in GL mode |
+
+Not measured: the work SteamVR itself does inside `SetOverlayTexture` (the
+Steam Frame Eye overlay on the same headset makes the same call at 25 Hz).
+Whether vrcompositor survives a GL overlay's exit is a separate question and
+has not been systematically tested (see "Known issues").
+
 ## Known issues on the Steam Frame (SteamVR 2.17.10, gamescope 3.16.28-43)
 
 - **`SetOverlayRaw` crashes vrcompositor when the client exits.** A texture uploaded
@@ -310,28 +318,19 @@ or `GL texture path unavailable (...)` when the texture path is chosen, and
   headset UI) then crash-loops on `CVulkanTexture::BInit: Assertion !modifiers.empty()`
   until the overlay is gone. Raw mode is therefore only available as
   `--texture-mode raw --unsafe-raw`, for debugging, and never used automatically.
-- **File mode is the default for now.** `SetOverlayFromFile` is loaded by the
+- **The exit safety of the GL path (`auto`, the default) is not systematically
+  tested.** It uses the same `SetOverlayTexture` path as the Steam Frame Eye
+  overlay, but whether the compositor survives the overlay exiting (normally,
+  killed, and across reconnects) has only been observed once. To check it on
+  your own headset, run the optional
+  [`overlay/tools/gl_exit_test.sh`](#testing-the-gl-texture-path-on-the-headset).
+  If vrcompositor ever crashes when the overlay exits, switch to file mode:
+  `bash ~/Babble-Bridge/overlay/install-overlay.sh --texture-mode file`.
+- **File mode is the verified fallback.** `SetOverlayFromFile` is loaded by the
   server itself, and with it the compositor survives the overlay exiting and
   gamescope restarts cleanly while the overlay is alive (verified). The load is
   asynchronous (about 1 s) and may show a blank frame, which is why file mode
   uploads at most every 2 s and only when the content changed.
-- **The GL path is pending the on-headset test.** It uses the same
-  `SetOverlayTexture` path as the Steam Frame Eye overlay, but whether the
-  compositor survives the overlay exiting (normally, killed, and across
-  reconnects) has only been observed once. Run
-  [`overlay/tools/gl_exit_test.sh`](#testing-the-gl-texture-path-on-the-headset)
-  with blocks E (by hand) and F (`--blocks F`), then switch with
-  `bash ~/Babble-Bridge/overlay/install-overlay.sh --texture-mode auto`.
-  Result so far: not run yet.
-- **Upgrading from 0.1.x:** remove `/etc/udev/rules.d/90-babble-tracker.rules`
-  if its instructions had you install it: it lets any program running as
-  `steamos` load kernel code (see [Install](#install-steamvr-overlay); the
-  installers warn about it). `install-overlay.sh` restarts a running instance
-  only when it can tell that it uses file mode (an explicit `--texture-mode
-  file`, or the panel file the file-mode 0.1.x builds keep in `/dev/shm`). Any
-  other old instance may be one of the first 0.1.0 builds, which always used
-  raw mode, so it is left alone (stopping it would crash the compositor):
-  reboot the headset instead.
 - If the headset UI ever loops ("Dependency failed for Gamescope VR Session" every
   second in `journalctl --user`), remove the overlay first:
   `python3 ~/fcam/fcam_overlay.py --uninstall`, then `pkill -f fcam_overlay.py`.
@@ -340,11 +339,12 @@ or `GL texture path unavailable (...)` when the texture path is chosen, and
 
 ## Testing the GL texture path on the headset
 
-`overlay/tools/gl_exit_test.sh` runs blocks A-D of the exit test, and block F
-on request. Run it on the headset as `steamos`, with SteamVR running, from the
-copy to be tested, in a terminal: blocks B2 and F ask you to open the tab, so
-over ssh use `ssh -t` (without a terminal the script refuses to start, unless
-`--no-prompt` skips B2 and F, and then the result cannot be PASS):
+`overlay/tools/gl_exit_test.sh` is an optional check of the GL path on your own
+headset. It runs blocks A-D of the exit test, and block F on request. Run it on
+the headset as `steamos`, with SteamVR running, from the copy to be tested, in
+a terminal: blocks B2 and F ask you to open the tab, so over ssh use `ssh -t`
+(without a terminal the script refuses to start, unless `--no-prompt` skips B2
+and F, and then the result cannot be PASS):
 
 ```sh
 ssh -t steamos@<headset-ip> 'bash ~/Babble-Bridge/overlay/tools/gl_exit_test.sh'              # blocks A-D, about 25 minutes
@@ -408,7 +408,7 @@ Then:
   open when the headset went into standby (a hidden tab uploads nothing); with
   the tab closed their absence is not a failure.
   `bash ~/Babble-Bridge/overlay/install-overlay.sh` (no options) goes back to
-  file mode.
+  the default (`auto`).
 - **F: smoothness and resources:** `gl_exit_test.sh --blocks F`. It stops the
   installed overlay first, because a second instance would fight over the same
   overlay key. With the tab open, the marker at the top right must move
@@ -418,9 +418,9 @@ Then:
   flat. It also counts the `GL error(s) ... left by SetOverlayTexture` lines
   in the log.
 
-If only SIGKILL runs crash, GL is still better than raw, but decide before
-changing the default. If anything crashes and the headset UI loops, see
-"Known issues".
+If a `gl` run crashes vrcompositor, switch to file mode
+(`bash ~/Babble-Bridge/overlay/install-overlay.sh --texture-mode file`); if the
+headset UI loops, see "Known issues".
 
 ## Bridge options
 
@@ -441,11 +441,11 @@ or `/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_<serial>-if00`.
 
 `fcam_overlay.py` accepts the same options plus `--install`, `--uninstall`,
 `--status`, `--start`, `--stop`, `--no-launch`, `--openvr-lib`, `--log-file`, `--lock-file`,
-`--texture-mode auto|gl|file|none` (see [Texture modes](#texture-modes)) and
+`--texture-mode auto|gl|file|none` (default `auto`, see [Texture modes](#texture-modes)) and
 `--app-type overlay|background`. `--unsafe-raw` exists for debugging only: it
 allows `--texture-mode raw`. `--install` writes the other options given with it
 into the manifest's `arguments` (which SteamVR launches the overlay with) and
-restarts a running instance, so `install-overlay.sh --texture-mode auto`
+restarts a running instance, so `install-overlay.sh --texture-mode file`
 switches the mode; `--status` shows the registered arguments and the running
 instance with its texture path. The single-instance lock is
 `$XDG_RUNTIME_DIR/ottlabs.fcam.lock` (JSON: pid, version, texture mode, texture
@@ -467,7 +467,7 @@ default 30), which is how the bridge is tested without a headset.
 | `overlay/install-overlay.sh` | Installer (no root). |
 | `overlay/tools/dmabuf_probe.py` | Diagnostic: dmabuf formats/modifiers SteamVR offers (see known issues). |
 | `overlay/tools/render_screenshot.py`, `docs/overlay-panel.png` | Renders the README screenshot of the dashboard panel. |
-| `overlay/tools/gl_exit_test.sh` | On-headset exit test of the GL texture path (blocks A-D and F, see above). |
+| `overlay/tools/gl_exit_test.sh` | Optional on-headset exit test of the GL texture path (blocks A-D and F, see above). |
 | `overlay/tools/gen_openvr_indices.py` | Prints the OpenVR function-table positions from `openvr_capi.h`, to re-check `openvr_min.py`. |
 | `fcam-bridge.service`, `install-headset.sh` | systemd alternative. |
 | `build-cdc-acm.sh` | Builds `cdc-acm.ko` for the running kernel on the headset (no root); `--install` stages it for loading at boot (one sudo password). |
@@ -492,7 +492,7 @@ while time.time() - t < 3:
 EOF
 ```
 
-Then replay it on the PC and point Babble (or its `tools/FcamProbe`) at it:
+Then replay it on the PC and point Baballonia (or its `tools/FcamProbe`) at it:
 
 ```sh
 python fcam_bridge.py --serial tracker.etvr --listen 127.0.0.1:8555 --stats 5
@@ -546,8 +546,8 @@ push and builds the release tarballs on the Forgejo mirror.
 | `... closed, waiting for it to come back` repeatedly | The tracker is re-enumerating on USB (power, hub or cable). The bridge finds it again by USB id, whichever `ttyACMn` it gets. |
 | `overlay upload failed ... RequestFailed` once | SteamVR's compositor is in standby (headset off). Uploads resume when it wakes (`overlay uploads work again`). |
 | Panel footer shows `file (GL failed)` or `none (GL failed)` | The GL texture path could not be used. `grep 'GL texture path' ~/fcam/fcam_overlay.log` shows why (missing `libEGL.so.1`, no surfaceless EGL display, GL errors during uploads, SteamVR rejecting the GL texture). |
-| The tab blinks every few seconds | File mode: SteamVR reloads the PNG when the panel content changed (at most every 2 s). The GL path does not blink; switch to it with `install-overlay.sh --texture-mode auto` once the GL test passed. |
-| `--install` says `restart required: reboot the headset`, or `--uninstall` says `left running` | The running instance uses raw mode, or may (an old 0.1.x instance whose mode cannot be told), and stopping it while SteamVR runs would crash the compositor. Reboot the headset; after `--install` SteamVR then starts the new version. |
+| The tab blinks every few seconds | File mode: SteamVR reloads the PNG when the panel content changed (at most every 2 s). The GL path does not blink. If the footer says `file (GL failed)`, see the row above; if the overlay was installed with `--texture-mode file`, `install-overlay.sh` without it goes back to the default (`auto`). |
+| `--install` says `restart required: reboot the headset`, or `--uninstall` says `left running` | The running instance uses raw mode, or may (an instance whose texture mode cannot be told), and stopping it while SteamVR runs would crash the compositor. Reboot the headset; after `--install` SteamVR then starts the new version. |
 | `gl_exit_test.sh` ends with `RESULT: NOT FINISHED` | The headset went to standby (or SteamVR restarted) during the test; no crash was found. Keep the headset awake and run it again. |
 | Headset UI restarts every second | See "Known issues": unregister the overlay (`--uninstall`, then `pkill -f fcam_overlay.py`). Never run `--texture-mode raw`. |
 | Bridge stops after headset standby | Expected when SteamVR shuts down; it is relaunched when SteamVR starts. |

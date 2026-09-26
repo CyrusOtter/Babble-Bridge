@@ -38,7 +38,7 @@
 #
 # A run fails when vrcompositor or gamescope has a different pid afterwards, the journal reports one
 # of them terminating abnormally, the overlay never confirms its texture, or it does not exit
-# cleanly. The script stops at the first failure. Pass criterion for switching the default to auto:
+# cleanly. The script stops at the first failure. Pass criterion (auto, the default mode, uses GL):
 # every run of blocks A-D passes, which is 36 GL exits (B1 20 + B2 5 + C 10 + D 1), 10 of them
 # SIGKILL; no crash in 36 exits puts the crash rate below about 8 % (95 % confidence, rule of three).
 # Block E (SteamVR restart, standby) is manual, and in F you judge the smoothness; see README.md.
@@ -435,6 +435,9 @@ summary() {
     say "   GL exits without a compositor crash (A-D): $gl_exits ($gl_kills of them SIGKILL)"
     if [ -n "$failure" ]; then
         say "   RESULT: FAIL at $failure"
+        case "$failure" in
+            *" gl SIG"*CRASH*) say "   A GL run crashed the compositor: switch to file mode: bash $src/install-overlay.sh --texture-mode file" ;;
+        esac
         say "   If the headset UI loops, see README.md 'Known issues'."
     elif [ -n "$unfinished" ]; then
         say "   RESULT: NOT FINISHED: $unfinished."
@@ -446,7 +449,7 @@ summary() {
         fi
     elif [ "$complete" = 1 ]; then
         say "   RESULT: PASS (every run of blocks A-D: $gl_exits GL exits, $gl_kills of them SIGKILL, no crash)."
-        say "   Next: block E by hand (README.md) and --blocks F, then: bash $src/install-overlay.sh --texture-mode auto"
+        say "   Next: block E by hand (README.md) and --blocks F."
     else
         say "   RESULT: no failure in the blocks that ran ($blocks), but not the complete matrix A-D"
     fi

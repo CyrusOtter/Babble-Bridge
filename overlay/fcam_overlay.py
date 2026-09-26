@@ -11,12 +11,11 @@ Standard library only. Works headless too: while SteamVR is not running the brid
 streaming and the overlay connects as soon as SteamVR comes up.
 
 How the panel reaches SteamVR (--texture-mode):
-    file   PNG in $XDG_RUNTIME_DIR, SetOverlayFromFile; only when the content changed, at most every
-           2 s (SteamVR loads it asynchronously). The default until the GL path passed the on-headset
-           exit test (tools/gl_exit_test.sh).
+    auto   gl, falling back to file when GL fails. The default.
     gl     one persistent GLES texture (gl_texture.py, EGL surfaceless), SetOverlayTexture; if GL
            cannot be used the tab stays blank (strict, for testing).
-    auto   gl, falling back to file when GL fails.
+    file   PNG in $XDG_RUNTIME_DIR, SetOverlayFromFile; only when the content changed, at most every
+           2 s (SteamVR loads it asynchronously). What auto falls back to; exits safely (verified).
     none   no texture at all (diagnostics).
     raw    SetOverlayRaw; only with --unsafe-raw: it crashes vrcompositor on the Steam Frame when the
            overlay exits. Never chosen automatically.
@@ -78,7 +77,7 @@ LEGACY_LOCK = os.path.join(HERE, "fcam_overlay.lock")   # 0.1.x: per install dir
 LEGACY_PANEL_FILE = "/dev/shm/fcam-panel-%d.png"         # written only by 0.1.x builds in file mode
 
 TEXTURE_MODES = ("auto", "gl", "file", "none", "raw")
-DEFAULT_TEXTURE_MODE = "file"   # phase 1: GL stays opt-in until tools/gl_exit_test.sh passed on the headset
+DEFAULT_TEXTURE_MODE = "auto"   # GL (SetOverlayTexture), file mode if GL fails; never raw
 RESTARTABLE_MODES = ("auto", "gl", "file", "none")
 RAW_REFUSED = ("--texture-mode raw needs --unsafe-raw: SetOverlayRaw leaves vrcompositor holding a buffer "
                "that belongs to this process, and on the Steam Frame the compositor dies with SIGBUS as soon "
@@ -1660,9 +1659,9 @@ def build_parser():
     parser.add_argument("--no-launch", action="store_true", help="with --install: do not (re)start the overlay now")
     parser.add_argument("--openvr-lib", default=None, help="path to libopenvr_api.so (auto-detected)")
     parser.add_argument("--texture-mode", choices=TEXTURE_MODES, default=DEFAULT_TEXTURE_MODE,
-                        help="how the panel reaches SteamVR: 'file' (PNG via SetOverlayFromFile, default), 'gl' "
-                             "(persistent GL texture via SetOverlayTexture), 'auto' (gl, else file), 'none' "
-                             "(no texture); 'raw' needs --unsafe-raw")
+                        help="how the panel reaches SteamVR: 'auto' (gl, else file; default), 'gl' "
+                             "(persistent GL texture via SetOverlayTexture), 'file' (PNG via SetOverlayFromFile), "
+                             "'none' (no texture); 'raw' needs --unsafe-raw")
     parser.add_argument("--unsafe-raw", action="store_true",
                         help="debugging only: allow --texture-mode raw (SetOverlayRaw), which crashes the Steam "
                              "Frame compositor when the overlay exits")

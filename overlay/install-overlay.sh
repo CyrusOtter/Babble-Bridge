@@ -11,8 +11,8 @@
 # Extra arguments are overlay options; they are recorded in the manifest SteamVR launches it with,
 # and a running instance is restarted with them (a raw-mode one only by a reboot). For example:
 #
-#   bash install-overlay.sh --texture-mode auto    # GL texture, file mode if GL fails
-#   bash install-overlay.sh                        # back to the defaults (file mode)
+#   bash install-overlay.sh --texture-mode file    # PNG files that SteamVR loads itself, no GL
+#   bash install-overlay.sh                        # back to the defaults (auto: GL, file mode if GL fails)
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -43,7 +43,7 @@ FCAM overlay installed in $dest.
   log:     $dest/fcam_overlay.log
   remove:  python3 $dest/fcam_overlay.py --uninstall
   Baballonia face camera address: fcam://${ip:-<headset-ip>}:8555
-  texture mode: ${mode:-unknown} (change: bash $here/install-overlay.sh --texture-mode auto|gl|file)
+  texture mode: ${mode:-unknown} (change: bash $here/install-overlay.sh --texture-mode file|gl; without it: auto, the default)
   texture path in use: grep -E 'GL texture path|panel texture' $dest/fcam_overlay.log | tail -3
 MSG
 if [ ! -d /sys/module/cdc_acm ]; then
