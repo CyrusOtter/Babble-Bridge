@@ -63,8 +63,11 @@ for every chunk but the last. The receiver:
 3. decodes the frame once all `chunk_count` chunks arrived, and validates the
    JPEG by decoding it (the bridge already checked SOI/EOI markers).
 
-Chunks of a `frame_seq` older than the one being assembled (in modular
-arithmetic) are ignored.
+A `frame_seq` up to 32 behind the newest one seen (in modular arithmetic) is a
+late straggler or duplicate and is ignored. A `frame_seq` further behind means
+the sender restarted its counter, for example after a bridge restart: the
+receiver forgets the old sequence and assembles the new frame at once instead
+of waiting for the counter to catch up.
 
 ### STATUS (bridge → receiver)
 
@@ -91,6 +94,15 @@ stateful firewalls on the receiver side accept the frames as replies.
 
 Best-effort notice that the receiver is stopping. The bridge removes the
 subscriber immediately instead of waiting for the timeout.
+
+### Reconnecting
+
+A receiver keeps subscribing for as long as it wants frames, also while the
+bridge does not answer, so a bridge that restarts or comes back online resumes
+the stream within a second. When nothing at all arrives for 5 seconds,
+Baballonia also resolves the bridge's host name again and subscribes from a new
+socket, every 5 seconds until the bridge answers. That covers a changed address
+and stale firewall or NAT state.
 
 ## Addresses in Baballonia
 
